@@ -1,0 +1,24 @@
+[package]
+name = "gtk-calc"
+version = "0.1.0"
+edition = "2021"
+authors = ["Kevin Hinds <https://github.com/khinds10>"]
+description = "A GTK4 calculator written in Rust (GNOME Calculator feature port)"
+license = "GPL-3.0-or-later"
+readme = "README.md"
+
+[[bin]]
+name = "gtk-calc"
+path = "src/main.rs"
+
+[dependencies]
+gtk4 = { version = "0.9", features = ["v4_10"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "5"
+gtk-theme = { path = "../gtk-theme" }
+
+[profile.release]
+lto = true
+strip = true
+opt-level = "z"

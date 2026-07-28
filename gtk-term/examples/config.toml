@@ -1,0 +1,42 @@
+# gtk-term configuration
+# Copy to ~/.config/gtk-term/config.toml and edit.
+
+# Pango font description: "<family> <size>".
+font = "monospace 12"
+use_custom_font = true
+
+# Preferred terminal grid (also used by Advanced → size presets).
+columns = 80
+rows = 24
+
+# Cell spacing multipliers (1.0 = default).
+cell_width_scale = 1.0
+cell_height_scale = 1.0
+
+# never | focused | unfocused | always
+text_blink = "always"
+
+# block | ibeam | underline
+cursor_shape = "block"
+
+# system | on | off
+cursor_blink_mode = "system"
+
+audible_bell = true
+show_scrollbar = true
+scroll_on_output = false
+scroll_on_keystroke = true
+scroll_on_paste = true
+limit_scrollback = true
+scrollback_lines = 10000
+
+[colors]
+# Default theme: Gruvbox Dark.
+foreground = "#ebdbb2"
+background = "#282828"
+
+# 16 ANSI colors: indexes 0-7 are normal, 8-15 are bright.
+palette = [
+  "#282828", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#a89984",
+  "#928374", "#fb4934", "#b8bb26", "#fabd2f", "#83a598", "#d3869b", "#8ec07c", "#ebdbb2",
+]

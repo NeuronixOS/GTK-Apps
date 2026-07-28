@@ -1,0 +1,26 @@
+[window]
+width = 980
+height = 640
+sidebar_visible = true
+sidebar_width = 200
+# Right terminal sidebar width (pixels)
+terminal_width = 360
+
+[view]
+# "list" or "grid"
+mode = "list"
+show_hidden = false
+# name | size | type | modified
+sort_by = "name"
+sort_folders_first = true
+sort_reversed = false
+icon_size = 64
+# small (48) | medium (64) | large (96) | larger (128) | largest (192)
+thumbnail_size = "medium"
+
+[behavior]
+confirm_trash = true
+confirm_delete = true
+# Open items with a single click (false = double-click)
+single_click = false
+open_folders_in_new_tab = false

@@ -1,0 +1,107 @@
+# === GTK-Apps monorepo (combined from nested .gitignore files) ===
+
+# Build artifacts
+**/target/
+**/_build/
+**/.deps/
+**/.cache/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.so
+build/
+dist/
+*.egg-info/
+MANIFEST
+*-installed
+*.log
+
+# Rust
+**/*.rs.bk
+
+# Virtualenvs
+**/.venv/
+**/venv/
+**/env/
+**/ENV/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# VCS conflict leftovers
+*.orig
+*.rej
+
+# Nested git repos (suite is the monorepo)
+**/.git/
+
+# Personal sync helper (Neuronix / KvNix local trees)
+syn-to-devices.sh
+
+# Secrets & local OAuth
+**/credentials.json
+**/token.json
+.env
+.env.*
+
+# Tooling caches
+.coverage
+.flatpak-builder/
+.mypy_cache/
+.pytest_cache/
+
+# Per-user runtime data (lives under ~/.config/gtk-apps/)
+**/config.json
+!**/config.dist.json
+**/favorites.json
+**/recent.json
+**/best.json
+!**/best.dist.json
+**/websites.json
+**/websites_thumbnail_overrides.json
+**/websites_img/
+**/workspaces.json
+**/work_time_zones_data.json
+*.json.bak
+
+# gtk-photos: ignore in-tree JSON runtime copies; keep *.dist.json templates
+**/gtk-photos/*.json
+!**/gtk-photos/*.dist.json
+
+# Local TOML configs (examples/ and *.dist stay tracked)
+/config.toml
+**/gtk-files/config.toml
+**/gtk-files/places.toml
+!**/examples/config.toml
+
+# --- gtk-meld: generated / intltool outputs (sources are *.in / *.in.in) ---
+**/gtk-meld/data/gschemas.compiled
+**/gtk-meld/data/meld.gresource
+**/gtk-meld/data/org.gnome.Meld.gresource
+**/gtk-meld/data/appdata.xml
+**/gtk-meld/data/mime/meld.xml
+**/gtk-meld/**/*.desktop
+**/gtk-meld/data/styles/meld-base.style-scheme.xml
+**/gtk-meld/data/styles/meld-dark.style-scheme.xml
+
+# gtk-meld/po gettext build leftovers
+**/gtk-meld/po/*.gmo
+**/gtk-meld/po/*.mo
+**/gtk-meld/po/*.pot
+**/gtk-meld/po/Makefile
+**/gtk-meld/po/Makefile.in
+**/gtk-meld/po/Makefile.in.in
+**/gtk-meld/po/cat-id-tbl.c
+**/gtk-meld/po/messages
+**/gtk-meld/po/missing
+**/gtk-meld/po/notexist
+**/gtk-meld/po/po2tbl.sed
+**/gtk-meld/po/po2tbl.sed.in
+**/gtk-meld/po/stamp-cat-id

@@ -1,0 +1,31 @@
+[package]
+name = "gtk-edit"
+version = "0.1.0"
+edition = "2021"
+authors = ["Kevin Hinds <https://github.com/khinds10>"]
+description = "A GTK4 + GtkSourceView 5 text editor written in Rust (gedit feature port)"
+license = "GPL-2.0-or-later"
+readme = "README.md"
+
+[[bin]]
+name = "gtk-edit"
+path = "src/main.rs"
+
+[dependencies]
+gtk4 = { version = "0.9", features = ["v4_10"] }
+sourceview5 = { version = "0.9", features = ["v5_10"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "5"
+libloading = "0.8"
+regex = "1"
+chrono = "0.4"
+encoding_rs = "0.8"
+vte4 = "0.8"
+pulldown-cmark = "0.12"
+gtk-theme = { path = "../gtk-theme" }
+
+[profile.release]
+lto = true
+strip = true
+opt-level = "z"

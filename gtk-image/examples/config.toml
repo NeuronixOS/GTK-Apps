@@ -1,0 +1,19 @@
+# ~/.config/gtk-image/config.toml
+#
+# Copy this file into place:
+#   mkdir -p ~/.config/gtk-image
+#   cp examples/config.toml ~/.config/gtk-image/config.toml
+
+# Start in best-fit zoom mode (true) or 100% (false).
+best_fit = true
+
+# Zoom step factor applied by zoom-in / zoom-out (and scroll-wheel zoom).
+zoom_step = 1.25
+
+# Minimum / maximum free-zoom factors.
+zoom_min = 0.05
+zoom_max = 20.0
+
+# Remember window size between launches.
+window_width = 960
+window_height = 640

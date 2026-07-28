@@ -1,0 +1,19 @@
+# ~/.config/gtk-calc/config.toml
+
+# Angle unit for trig functions: "degrees", "radians", or "gradians"
+angle_unit = "degrees"
+
+# Display precision (significant digits for automatic format)
+precision = 12
+
+# Starting mode: "basic", "advanced", "programming", or "keyboard"
+mode = "basic"
+
+# Number base for programming mode: 2, 8, 10, or 16
+base = 10
+
+# Word size for bitwise ops in programming mode: 8, 16, 32, or 64
+word_size = 64
+
+window_width = 340
+window_height = 520

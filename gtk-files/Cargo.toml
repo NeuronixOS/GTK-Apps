@@ -1,0 +1,26 @@
+[package]
+name = "gtk-files"
+version = "0.1.0"
+edition = "2021"
+authors = ["Kevin Hinds <https://github.com/khinds10>"]
+description = "A GTK4 file manager written in Rust (Nautilus / GNOME Files feature port)"
+license = "GPL-3.0-or-later"
+readme = "README.md"
+
+[[bin]]
+name = "gtk-files"
+path = "src/main.rs"
+
+[dependencies]
+gtk4 = { version = "0.9", features = ["v4_10"] }
+vte4 = { version = "0.8", features = ["v0_70"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "5"
+regex = "1"
+gtk-theme = { path = "../gtk-theme" }
+
+[profile.release]
+lto = true
+strip = true
+opt-level = "z"

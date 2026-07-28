@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Sample snippet data ported from gedit snippets style -->
+<snippets>
+  <snippet>
+    <tag>gpl</tag>
+    <text><![CDATA[/*
+ * Copyright (C) YEAR AUTHOR
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+]]></text>
+  </snippet>
+</snippets>

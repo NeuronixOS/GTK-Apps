@@ -1,0 +1,61 @@
+[editor]
+use_default_font = true
+editor_font = "Monospace 12"
+scheme = "classic"
+create_backup_copy = false
+auto_save = false
+auto_save_interval = 10
+max_undo_actions = 2000
+wrap_mode = "word"
+tabs_size = 8
+insert_spaces = false
+auto_indent = false
+display_line_numbers = true
+highlight_current_line = true
+bracket_matching = true
+display_right_margin = false
+right_margin_position = 80
+smart_home_end = "after"
+restore_cursor_position = true
+syntax_highlighting = true
+search_highlighting = true
+ensure_trailing_newline = true
+backup_copy_extension = "~"
+
+[ui]
+toolbar_visible = false
+notebook_show_tabs_mode = "always"
+statusbar_visible = true
+side_panel_visible = true
+bottom_panel_visible = true
+max_recents = 5
+
+[print]
+print_syntax_highlighting = true
+print_header = true
+print_wrap_mode = "word"
+print_line_numbers = 0
+print_font_body = "Monospace 9"
+print_font_header = "Sans 11"
+print_font_numbers = "Sans 8"
+
+[encodings]
+auto_detected = ["UTF-8", "CURRENT", "ISO-8859-15", "UTF-16"]
+shown_in_menu = ["ISO-8859-15"]
+
+[plugins]
+active_plugins = ["docinfo", "modelines", "filebrowser", "spell", "time", "terminal"]
+
+[state]
+window_width = 900
+window_height = 600
+side_panel_size = 220
+bottom_panel_size = 360
+side_panel_page = "documents"
+search_history = []
+replace_history = []
+recent_files = []
+
+[session]
+restore_on_startup = true
+open_files = []

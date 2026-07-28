@@ -1,0 +1,28 @@
+[package]
+name = "gtk-term"
+version = "0.1.0"
+edition = "2021"
+authors = ["Kevin Hinds <https://github.com/khinds10>"]
+description = "A minimal, themeable GTK4 + VTE terminal emulator written in Rust"
+license = "MIT"
+repository = ""
+readme = "README.md"
+
+[[bin]]
+name = "gtk-term"
+path = "src/main.rs"
+
+# NOTE: gtk4 and vte4 must come from the SAME gtk-rs generation.
+# If cargo complains about two versions of `gtk4`, align these minor versions.
+[dependencies]
+gtk4 = "0.9"
+vte4 = { version = "0.8", features = ["v0_76"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "5"
+gtk-theme = { path = "../gtk-theme" }
+
+[profile.release]
+lto = true
+strip = true
+opt-level = "z"

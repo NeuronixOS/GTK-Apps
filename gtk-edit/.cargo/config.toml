@@ -1,0 +1,4 @@
+# Dropbox marks target/release/deps immutable, which blocks cargo from
+# writing binaries. Build outside the synced tree instead.
+[build]
+target-dir = "/tmp/gtk-edit-target"
