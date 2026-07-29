@@ -2,7 +2,7 @@
 
 GTK4 visual diff and merge tool (based on [Meld](https://meld.app/)), with the shared suite Profile menu via `gtk-theme`.
 
-Created by Kevin Hinds — [github.com/khinds10-Neuronix/GTK-Apps](https://github.com/khinds10-Neuronix/GTK-Apps)
+Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/NeuronixOS/GTK-Apps)
 
 ## Build
 

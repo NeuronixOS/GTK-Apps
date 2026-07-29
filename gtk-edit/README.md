@@ -2,7 +2,7 @@
 
 A GTK4 + GtkSourceView 5 text editor written in Rust — a feature port of classic **gedit 3.5.1** (see `../Source-Apps/gedit`).
 
-Created by Kevin Hinds — [github.com/khinds10-Neuronix/GTK-Apps](https://github.com/khinds10-Neuronix/GTK-Apps)
+Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/NeuronixOS/GTK-Apps)
 
 - Tabbed MDI editing with tab groups and multi-window
 - Syntax highlighting, encodings, backups, autosave

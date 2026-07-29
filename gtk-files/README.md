@@ -3,7 +3,7 @@
 A GTK4 file manager written in Rust — a feature port of **GNOME Files (Nautilus)**
 (see `../Source-Apps/nautilus`).
 
-Created by Kevin Hinds — [github.com/khinds10-Neuronix/GTK-Apps](https://github.com/khinds10-Neuronix/GTK-Apps)
+Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/NeuronixOS/GTK-Apps)
 
 - Places sidebar (Home, XDG dirs, Computer, Trash, bookmarks / favorites / recent in `places.toml`)
 - Tabbed browsing with closable, reorderable tabs

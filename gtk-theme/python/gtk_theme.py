@@ -36,8 +36,8 @@ OPEN_THEME_EDITOR_MENU_ACTION = "win.open-theme-editor"
 
 ABOUT_ACTION = "about"
 ABOUT_MENU_ACTION = "win.about"
-SUITE_WEBSITE = "https://github.com/khinds10-Neuronix/GTK-Apps"
-SUITE_WEBSITE_LABEL = "github.com/khinds10-Neuronix/GTK-Apps"
+SUITE_WEBSITE = "https://github.com/NeuronixOS/GTK-Apps"
+SUITE_WEBSITE_LABEL = "github.com/NeuronixOS/GTK-Apps"
 SUITE_AUTHOR = "Created by Kevin Hinds"
 
 _profiles: list["Profile"] | None = None

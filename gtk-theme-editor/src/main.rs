@@ -18,8 +18,8 @@ use gtk::prelude::*;
 use gtk_theme::ProfileData;
 
 const APP_ID: &str = "org.neuronix.GtkThemeEditor";
-const SUITE_WEBSITE: &str = "https://github.com/khinds10-Neuronix/GTK-Apps";
-const SUITE_WEBSITE_LABEL: &str = "github.com/khinds10-Neuronix/GTK-Apps";
+const SUITE_WEBSITE: &str = "https://github.com/NeuronixOS/GTK-Apps";
+const SUITE_WEBSITE_LABEL: &str = "github.com/NeuronixOS/GTK-Apps";
 const SUITE_AUTHOR: &str = "Created by Kevin Hinds";
 
 /// ANSI slot roles for the 16-color palette (matches terminal color numbering).

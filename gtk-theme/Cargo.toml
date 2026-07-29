@@ -2,7 +2,7 @@
 name = "gtk-theme"
 version = "0.1.0"
 edition = "2021"
-authors = ["Kevin Hinds <https://github.com/khinds10>"]
+authors = ["Kevin Hinds <https://github.com/NeuronixOS/GTK-Apps>"]
 description = "Shared color profiles and Adwaita icon helpers for the GTK4 apps suite"
 license = "GPL-3.0-or-later"
 

@@ -3,7 +3,7 @@
 A GTK4 calculator written in Rust, implementing the core feature set of
 [GNOME Calculator](../Source-Apps/gnome-calculator).
 
-Created by Kevin Hinds — [github.com/khinds10-Neuronix/GTK-Apps](https://github.com/khinds10-Neuronix/GTK-Apps)
+Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/NeuronixOS/GTK-Apps)
 
 - Expression entry with Unicode operators (`× ÷ − √ ∧ ∨ ⊻ ≪ ≫`)
 - **Basic**, **Advanced**, **Programming**, and **Keyboard** modes

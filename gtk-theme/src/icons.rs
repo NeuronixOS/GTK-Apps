@@ -81,6 +81,27 @@ pub fn ensure_adwaita_icons() {
     });
 }
 
+/// Strip GTK mnemonic markers from a label (`_About` → `About`, `__` → `_`).
+///
+/// Custom [`IconMenu`] rows use a plain [`gtk::Label`], which does not honor
+/// underscore mnemonics — leaving `_About` visible literally.
+pub fn strip_mnemonic(label: &str) -> String {
+	let mut out = String::with_capacity(label.len());
+	let mut chars = label.chars().peekable();
+	while let Some(c) = chars.next() {
+		if c == '_' {
+			if chars.peek() == Some(&'_') {
+				chars.next();
+				out.push('_');
+			}
+			// else: drop the mnemonic marker; keep the following character
+			continue;
+		}
+		out.push(c);
+	}
+	out
+}
+
 /// A single custom menu row: icon beside label.
 #[derive(Debug, Clone)]
 pub struct MenuIconEntry {
@@ -129,9 +150,10 @@ impl IconMenu {
     /// Append a normal actionable item; icon is shown beside the label.
     pub fn append(&mut self, menu: &gio::Menu, label: &str, action: &str, icon: &str) {
         let id = self.alloc_id();
+        let display = strip_mnemonic(label);
         // Action stays on the model for accel display / exporters; the custom
         // child button re-binds the same action for clicks.
-        let item = gio::MenuItem::new(Some(label), Some(action));
+        let item = gio::MenuItem::new(Some(&display), Some(action));
         item.set_attribute_value("custom", Some(&id.to_variant()));
         let gicon = gio::ThemedIcon::new(icon);
         item.set_icon(&gicon);
@@ -139,7 +161,7 @@ impl IconMenu {
         self.entries.push(MenuIconEntry {
             id,
             icon: icon.to_string(),
-            label: label.to_string(),
+            label: display,
             action: action.to_string(),
         });
     }
@@ -158,7 +180,8 @@ impl IconMenu {
         submenu: &gio::Menu,
         icon: &str,
     ) {
-        let item = gio::MenuItem::new(Some(label), None);
+        let display = strip_mnemonic(label);
+        let item = gio::MenuItem::new(Some(&display), None);
         item.set_submenu(Some(submenu));
         let gicon = gio::ThemedIcon::new(icon);
         item.set_icon(&gicon);

@@ -11,8 +11,8 @@ mod icons;
 
 pub use icons::{
     app_icons, ensure_adwaita_icons, icon_button, icon_for_action, icon_for_label, icon_label_box,
-    labeled_button, symbolic_image, IconMenu, MenuIconEntry, RUNTIME_ICON_THEME_PACKAGE,
-    SYMBOLIC_PIXEL_SIZE,
+    labeled_button, strip_mnemonic, symbolic_image, IconMenu, MenuIconEntry,
+    RUNTIME_ICON_THEME_PACKAGE, SYMBOLIC_PIXEL_SIZE,
 };
 
 use std::cell::RefCell;

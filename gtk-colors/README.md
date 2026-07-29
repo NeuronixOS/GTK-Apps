@@ -2,7 +2,7 @@
 
 GTK4 color picker and format converter for the Neuronix GTK-Apps suite.
 
-Created by Kevin Hinds — [github.com/khinds10-Neuronix/GTK-Apps](https://github.com/khinds10-Neuronix/GTK-Apps)
+Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/NeuronixOS/GTK-Apps)
 
 ## Features
 

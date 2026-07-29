@@ -2,7 +2,7 @@
 name = "gtk-edit"
 version = "0.1.0"
 edition = "2021"
-authors = ["Kevin Hinds <https://github.com/khinds10>"]
+authors = ["Kevin Hinds <https://github.com/NeuronixOS/GTK-Apps>"]
 description = "A GTK4 + GtkSourceView 5 text editor written in Rust (gedit feature port)"
 license = "GPL-2.0-or-later"
 readme = "README.md"

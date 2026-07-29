@@ -4,7 +4,7 @@ Shared color profiles and UI chrome for the Neuronix GTK-Apps suite (Rust crate 
 
 Provides built-in and custom profiles, the suite **Profile** / About menu, Adwaita icon helpers, and theming utilities used by every `gtk-*` app.
 
-Created by Kevin Hinds — [github.com/khinds10-Neuronix/GTK-Apps](https://github.com/khinds10-Neuronix/GTK-Apps)
+Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/NeuronixOS/GTK-Apps)
 
 ## Layout
 

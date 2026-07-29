@@ -3,7 +3,7 @@
 A GTK4 + VTE terminal emulator written in Rust, implementing the core
 feature set of GNOME Terminal.
 
-Created by Kevin Hinds — [github.com/khinds10-Neuronix/GTK-Apps](https://github.com/khinds10-Neuronix/GTK-Apps)
+Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/NeuronixOS/GTK-Apps)
 
 - Tabbed interface with full-width, reorderable, closable tabs
 - Find/search bar with regex, match case, and whole-word options

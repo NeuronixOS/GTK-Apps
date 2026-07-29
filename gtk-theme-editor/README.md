@@ -8,7 +8,7 @@ your own custom profiles, tweak the **foreground**, **background**, and the full
 your result under a custom name and it becomes available in every GTK-Apps
 suite app's *Profile* menu.
 
-Created by Kevin Hinds — [github.com/khinds10-Neuronix/GTK-Apps](https://github.com/khinds10-Neuronix/GTK-Apps)
+Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/NeuronixOS/GTK-Apps)
 
 ## Features
 

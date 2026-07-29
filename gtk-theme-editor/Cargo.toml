@@ -2,7 +2,7 @@
 name = "gtk-theme-editor"
 version = "0.1.0"
 edition = "2021"
-authors = ["Kevin Hinds <https://github.com/khinds10>"]
+authors = ["Kevin Hinds <https://github.com/NeuronixOS/GTK-Apps>"]
 description = "GTK4 front-end to load, live-tweak, and save GTK-Apps suite color profiles"
 license = "GPL-3.0-or-later"
 readme = "README.md"

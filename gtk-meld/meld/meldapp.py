@@ -103,8 +103,8 @@ class MeldApp(Adw.Application):
             dialog = Adw.AboutDialog(
                 application_icon=meld.conf.APPLICATION_ID,
                 application_name=meld.conf.APPLICATION_NAME,
-                website="https://github.com/khinds10-Neuronix/GTK-Apps",
-                issue_url="https://github.com/khinds10-Neuronix/GTK-Apps/issues",
+                website="https://github.com/NeuronixOS/GTK-Apps",
+                issue_url="https://github.com/NeuronixOS/GTK-Apps/issues",
                 license_type=Gtk.License.GPL_2_0,
             )
         else:
@@ -112,7 +112,7 @@ class MeldApp(Adw.Application):
                 f"/org/gnome/meld/{meld.conf.APPLICATION_ID}.metainfo.xml",
                 meld.conf.__version__,
             )
-            dialog.set_website("https://github.com/khinds10-Neuronix/GTK-Apps")
+            dialog.set_website("https://github.com/NeuronixOS/GTK-Apps")
         dialog.set_copyright(
             "Copyright © 2002-2009 Stephen Kennedy\n"
             "Copyright © 2009-2026 Kai Willadsen\n"

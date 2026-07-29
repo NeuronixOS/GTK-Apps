@@ -864,7 +864,7 @@ fn build_menubar(
         "x-office-document-symbolic",
     );
 
-    icons.append_action(&menubar, "_About", "win.about");
+    icons.append_action(&menubar, "About", "win.about");
 
     (menubar, icons)
 }
@@ -1211,8 +1211,8 @@ fn install_actions(ew: &Rc<EditorWindow>) {
                 "gtk-edit standalone text editor application, in Rust that edits plain text with GtkSourceView.",
             )
             .authors(["Created by Kevin Hinds"])
-            .website("https://github.com/khinds10-Neuronix/GTK-Apps")
-            .website_label("github.com/khinds10-Neuronix/GTK-Apps")
+            .website("https://github.com/NeuronixOS/GTK-Apps")
+            .website_label("github.com/NeuronixOS/GTK-Apps")
             .license_type(gtk::License::Gpl20)
             .build();
         dialog.present();

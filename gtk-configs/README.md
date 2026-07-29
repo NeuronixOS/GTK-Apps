@@ -2,7 +2,7 @@
 
 GTK4 Python editor for Neuronix config trees (`~/configs` or any `--root`).
 
-Created by Kevin Hinds — [github.com/khinds10-Neuronix/GTK-Apps](https://github.com/khinds10-Neuronix/GTK-Apps)
+Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/NeuronixOS/GTK-Apps)
 
 ## Local run
 

@@ -2,7 +2,7 @@
 name = "gtk-calc"
 version = "0.1.0"
 edition = "2021"
-authors = ["Kevin Hinds <https://github.com/khinds10>"]
+authors = ["Kevin Hinds <https://github.com/NeuronixOS/GTK-Apps>"]
 description = "A GTK4 calculator written in Rust (GNOME Calculator feature port)"
 license = "GPL-3.0-or-later"
 readme = "README.md"

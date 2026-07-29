@@ -2,7 +2,7 @@
 name = "gtk-files"
 version = "0.1.0"
 edition = "2021"
-authors = ["Kevin Hinds <https://github.com/khinds10>"]
+authors = ["Kevin Hinds <https://github.com/NeuronixOS/GTK-Apps>"]
 description = "A GTK4 file manager written in Rust (Nautilus / GNOME Files feature port)"
 license = "GPL-3.0-or-later"
 readme = "README.md"

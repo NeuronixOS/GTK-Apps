@@ -160,8 +160,8 @@ fn show_about(app: &gtk::Application) {
             "gtk-image standalone image viewer application, in Rust that browses, zooms, and transforms images.",
         )
         .authors(["Created by Kevin Hinds"])
-        .website("https://github.com/khinds10-Neuronix/GTK-Apps")
-        .website_label("github.com/khinds10-Neuronix/GTK-Apps")
+        .website("https://github.com/NeuronixOS/GTK-Apps")
+        .website_label("github.com/NeuronixOS/GTK-Apps")
         .license_type(gtk::License::Gpl30)
         .build();
     if let Some(win) = app.active_window() {

@@ -3,7 +3,7 @@
 A GTK4 image viewer written in Rust, implementing the core feature set of
 [Eye of GNOME](../Source-Apps/eog) (eog).
 
-Created by Kevin Hinds — [github.com/khinds10-Neuronix/GTK-Apps](https://github.com/khinds10-Neuronix/GTK-Apps)
+Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/NeuronixOS/GTK-Apps)
 
 - Open a file or folder (dialog, CLI args, drag-and-drop)
 - Browse sibling images in the directory (prev / next / first / last)
