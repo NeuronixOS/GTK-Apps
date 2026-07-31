@@ -5,6 +5,7 @@ mod config;
 mod dnd;
 mod file_ops;
 mod find_in_files;
+mod network;
 mod open_with;
 mod pathbar;
 mod places;
@@ -212,6 +213,7 @@ fn install_accels(app: &gtk::Application) {
     app.set_accels_for_action("win.go-forward", &["<Alt>Right", "Forward"]);
     app.set_accels_for_action("win.go-up", &["<Alt>Up"]);
     app.set_accels_for_action("win.go-home", &["<Alt>Home"]);
+    app.set_accels_for_action("win.connect-server", &["<Primary><Alt>s"]);
     app.set_accels_for_action("win.reload", &["<Ctrl>r", "F5"]);
     app.set_accels_for_action("win.edit-location", &["<Ctrl>l"]);
     app.set_accels_for_action("win.search", &["<Ctrl>f"]);

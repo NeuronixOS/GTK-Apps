@@ -22,11 +22,26 @@ impl Plugin for ChangeCasePlugin {
 impl WindowActivatable for ChangeCasePlugin {
     fn activate(&mut self, ctx: &WindowContext) {
         let win = ctx.window.clone();
-        for (name, label, transform) in [
-            ("changecase-upper", "All Upper Case", Transform::Upper),
-            ("changecase-lower", "All Lower Case", Transform::Lower),
-            ("changecase-title", "Invert Case", Transform::Invert),
-            ("changecase-titlecase", "Title Case", Transform::Title),
+        for (name, label, transform, accel) in [
+            (
+                "changecase-upper",
+                "All Upper Case",
+                Transform::Upper,
+                "<Primary>u",
+            ),
+            (
+                "changecase-lower",
+                "All Lower Case",
+                Transform::Lower,
+                "<Primary>l",
+            ),
+            ("changecase-title", "Invert Case", Transform::Invert, ""),
+            (
+                "changecase-titlecase",
+                "Title Case",
+                Transform::Title,
+                "<Primary>t",
+            ),
         ] {
             let action = gio::SimpleAction::new(name, None);
             let win2 = win.clone();
@@ -41,12 +56,26 @@ impl WindowActivatable for ChangeCasePlugin {
                 "changecase-titlecase" => "format-text-rich-symbolic",
                 _ => "emblem-system-symbolic",
             };
+            let menu_label = if accel.is_empty() {
+                label.to_string()
+            } else {
+                // Show the key in the Tools menu for discoverability.
+                let key = accel
+                    .trim_start_matches("<Primary>")
+                    .to_ascii_uppercase();
+                format!("{label} (Ctrl+{key})")
+            };
             ctx.menu_icons.borrow_mut().append(
                 &ctx.tools_menu,
-                label,
+                &menu_label,
                 &format!("win.{name}"),
                 icon,
             );
+            if !accel.is_empty() {
+                if let Some(app) = win.application() {
+                    app.set_accels_for_action(&format!("win.{name}"), &[accel]);
+                }
+            }
             self.actions.push(action);
         }
     }
@@ -113,7 +142,7 @@ pub fn factory() -> (PluginInfo, crate::plugin::activatable::PluginFactory) {
     let i = info(
         "changecase",
         "Change Case",
-        "Changes the case of selected text.",
+        "Changes the case of selected text (Ctrl+U upper, Ctrl+L lower, Ctrl+T title).",
     );
     make_factory(i.clone(), move || {
         Box::new(ChangeCasePlugin {

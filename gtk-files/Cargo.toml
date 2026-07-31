@@ -17,6 +17,7 @@ vte4 = { version = "0.8", features = ["v0_70"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "5"
+libc = "0.2"
 regex = "1"
 gtk-theme = { path = "../gtk-theme" }
 

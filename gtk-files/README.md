@@ -5,7 +5,8 @@ A GTK4 file manager written in Rust — a feature port of **GNOME Files (Nautilu
 
 Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/NeuronixOS/GTK-Apps)
 
-- Places sidebar (Home, XDG dirs, Computer, Trash, bookmarks / favorites / recent in `places.toml`)
+- Places sidebar (Home, XDG dirs, Computer, Trash, USB Devices, **Network** mounts, bookmarks / favorites / recent in `places.toml`)
+- **Connect to Server** (SFTP / FTP / SMB / WebDAV via GVFS) — sidebar **Connect to Network…** lists remembered remotes; mounts add a `~/Network/<name>` shortcut
 - Tabbed browsing with closable, reorderable tabs
 - Breadcrumb path bar and editable location entry (`Ctrl+L`)
 - Back / forward / up / home navigation history
@@ -97,6 +98,7 @@ Thumbnail sizes in grid view: `small` (48px), `medium` (64px), `large` (96px), `
 | `Alt+↑` | Parent folder |
 | `Alt+Home` | Home |
 | `Ctrl+L` | Enter location |
+| `Ctrl+Alt+S` | Connect to Server |
 | `Ctrl+R` / `F5` | Reload |
 | `Ctrl+T` / `Ctrl+W` | New / close tab |
 | `Ctrl+N` | New window |

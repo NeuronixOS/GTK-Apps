@@ -119,6 +119,7 @@ binary-compatible with upstream gedit/libpeas Python or C plugins.
 | Ctrl+G / Ctrl+Shift+G | Find next / previous |
 | Ctrl+H | Replace |
 | Ctrl+I | Go to line |
+| Ctrl+U / Ctrl+L / Ctrl+T | Upper / lower / title case (selection) |
 | Ctrl+P | Print |
 | F11 | Fullscreen |
 | Ctrl+PageUp/Down | Previous/next document |

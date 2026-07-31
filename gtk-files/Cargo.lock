@@ -375,6 +375,7 @@ dependencies = [
  "dirs",
  "gtk-theme",
  "gtk4",
+ "libc",
  "regex",
  "serde",
  "toml 0.8.23",

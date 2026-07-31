@@ -28,16 +28,109 @@ pub fn create_empty_file(parent_dir: &Path, name: &str) -> Result<PathBuf, Strin
 }
 
 pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf, String> {
-    if new_name.is_empty() || new_name.contains('/') {
+    let new_name = new_name.trim();
+    if new_name.is_empty() || new_name.contains('/') || new_name.contains('\0') {
+        return Err("Invalid name".into());
+    }
+    if new_name == "." || new_name == ".." {
         return Err("Invalid name".into());
     }
     let parent = path.parent().ok_or_else(|| "No parent".to_string())?;
     let dest = parent.join(new_name);
+
+    // Same path / same file → no-op (also covers case-only renames on
+    // case-insensitive volumes after canonicalize).
+    if paths_same_file(path, &dest) {
+        return Ok(path.to_path_buf());
+    }
+
     if dest.exists() {
         return Err(format!("“{new_name}” already exists"));
     }
-    std::fs::rename(path, &dest).map_err(|e| e.to_string())?;
+
+    // Atomic no-clobber on Linux so a race can't overwrite another file
+    // (std::fs::rename replaces the destination, which then confuses the
+    // directory model and can crash the UI).
+    rename_no_replace(path, &dest).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            format!("“{new_name}” already exists")
+        } else {
+            e.to_string()
+        }
+    })?;
     Ok(dest)
+}
+
+fn paths_same_file(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) if ca == cb => return true,
+        _ => {}
+    }
+    // Hard-link / same inode fallback.
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(ma), Ok(mb)) => {
+            use std::os::unix::fs::MetadataExt;
+            ma.dev() == mb.dev() && ma.ino() == mb.ino()
+        }
+        _ => false,
+    }
+}
+
+/// Rename that refuses to replace an existing destination.
+fn rename_no_replace(src: &Path, dest: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        const AT_FDCWD: libc::c_int = -100;
+        const RENAME_NOREPLACE: libc::c_uint = 1;
+
+        let src_c = CString::new(src.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid path"))?;
+        let dest_c = CString::new(dest.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid path"))?;
+
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                AT_FDCWD,
+                src_c.as_ptr(),
+                AT_FDCWD,
+                dest_c.as_ptr(),
+                RENAME_NOREPLACE,
+            )
+        };
+        if rc == 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        // Fall back only when renameat2 is unavailable; still never call
+        // plain rename if the destination exists.
+        if err.raw_os_error() == Some(libc::ENOSYS) {
+            if dest.exists() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "destination exists",
+                ));
+            }
+            return std::fs::rename(src, dest);
+        }
+        return Err(err);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if dest.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "destination exists",
+            ));
+        }
+        std::fs::rename(src, dest)
+    }
 }
 
 pub fn trash_paths(

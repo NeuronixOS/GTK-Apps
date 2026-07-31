@@ -15,6 +15,7 @@ use crate::clipboard::{self, ClipOp, SharedClipboard};
 use crate::config::Config;
 use crate::file_ops;
 use crate::find_in_files;
+use crate::network;
 use crate::open_with;
 use crate::pathbar::PathBar;
 use crate::places;
@@ -513,6 +514,10 @@ impl FilesWindow {
             self.sidebar.select_path(&p);
             self.pathbar.set_location(&p);
             self.terminal.sync_cwd_force(&p);
+        } else {
+            // Remote URI (sftp:// …) — show the URI in the path bar.
+            let uri = file.uri().to_string();
+            self.pathbar.set_location(Path::new(&uri));
         }
         self.back_btn.set_sensitive(tab.can_back());
         self.forward_btn.set_sensitive(tab.can_forward());
@@ -523,25 +528,47 @@ impl FilesWindow {
             Place::Path(p) => gio::File::for_path(p),
             Place::Uri(uri) => gio::File::for_uri(uri),
             Place::Trash => util::trash_file(),
+            Place::ConnectNetwork => gio::File::for_path(network::network_home_dir()),
         }
     }
 
-    fn open_place_in_current_tab(&self, place: &Place) {
-        let tab = self.current_tab();
+    fn open_place_in_current_tab(self: &Rc<Self>, place: &Place) {
         match place {
-            Place::Path(p) => tab.navigate_path(p, true),
-            Place::Uri(uri) => tab.navigate(gio::File::for_uri(uri), true),
-            Place::Trash => tab.navigate(util::trash_file(), true),
+            Place::ConnectNetwork => {
+                self.action_connect_server();
+                return;
+            }
+            Place::Path(p) => self.current_tab().navigate_path(p, true),
+            Place::Uri(uri) => {
+                // Mount if needed, then open.
+                let fw = Rc::clone(self);
+                let uri = uri.clone();
+                network::mount_and_open(&self.window, &uri, Rc::new(move |file| {
+                    fw.current_tab().navigate(file, true);
+                    fw.sidebar.rebuild();
+                    fw.sync_chrome();
+                }));
+                return;
+            }
+            Place::Trash => self.current_tab().navigate(util::trash_file(), true),
         }
         self.sync_chrome();
     }
 
     fn open_place_in_new_tab(self: &Rc<Self>, place: &Place) {
+        if matches!(place, Place::ConnectNetwork) {
+            self.action_connect_server();
+            return;
+        }
         self.add_tab(Some(Self::place_to_file(place)));
         self.sync_chrome();
     }
 
-    fn open_place_in_new_window(&self, place: &Place) {
+    fn open_place_in_new_window(self: &Rc<Self>, place: &Place) {
+        if matches!(place, Place::ConnectNetwork) {
+            self.action_connect_server();
+            return;
+        }
         let Some(app) = self.window.application() else {
             return;
         };
@@ -697,6 +724,7 @@ impl FilesWindow {
         bind(win, "goto-link-target", self, |fw, _, _| fw.action_goto_link_target());
         bind(win, "add-favorite", self, |fw, _, _| fw.action_add_favorite());
         bind(win, "add-bookmark", self, |fw, _, _| fw.action_add_bookmark());
+        bind(win, "connect-server", self, |fw, _, _| fw.action_connect_server());
         bind(win, "paste", self, |fw, _, _| fw.action_paste());
         bind(win, "paste-into", self, |fw, _, _| fw.action_paste_into());
         bind(win, "duplicate", self, |fw, _, _| fw.action_duplicate());
@@ -1021,6 +1049,18 @@ impl FilesWindow {
         }
     }
 
+    fn action_connect_server(self: &Rc<Self>) {
+        let fw = Rc::clone(self);
+        network::show_network_picker(
+            &self.window,
+            Rc::new(move |file| {
+                fw.current_tab().navigate(file, true);
+                fw.sidebar.rebuild();
+                fw.sync_chrome();
+            }),
+        );
+    }
+
     /// Paste into the folder currently shown in the tab (Ctrl+V / Paste).
     fn action_paste(&self) {
         let tab = self.current_tab();
@@ -1271,6 +1311,13 @@ impl FilesWindow {
         entry.select_region(0, -1);
         vbox.append(&gtk::Label::new(Some("New name:")));
         vbox.append(&entry);
+        let error = gtk::Label::new(None);
+        error.add_css_class("error");
+        error.add_css_class("dim-label");
+        error.set_wrap(true);
+        error.set_xalign(0.0);
+        error.set_visible(false);
+        vbox.append(&error);
         let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         buttons.set_halign(gtk::Align::End);
         let cancel =
@@ -1291,25 +1338,39 @@ impl FilesWindow {
             path,
             entry.clone(),
             dialog.clone(),
-            self.window.clone(),
+            error.clone(),
             Rc::clone(&tab),
         ))));
 
         let run = {
             let rename_once = Rc::clone(&rename_once);
             move || {
-                if let Some((path, entry, dialog, window, tab)) = rename_once.borrow_mut().take() {
-                    let new_name = entry.text().to_string();
-                    match file_ops::rename(&path, &new_name) {
-                        Ok(_) => {
+                let taken = rename_once.borrow_mut().take();
+                let Some((path, entry, dialog, error, tab)) = taken else {
+                    return;
+                };
+                let new_name = entry.text().to_string();
+                entry.remove_css_class("error");
+                error.set_visible(false);
+                match file_ops::rename(&path, &new_name) {
+                    Ok(_) => {
+                        error.set_visible(false);
+                        dialog.close();
+                        // Defer refresh so the modal tear-down finishes first —
+                        // refreshing mid-dialog has crashed the directory model.
+                        glib::idle_add_local_once(move || {
                             tab.refresh();
-                            dialog.close();
-                        }
-                        Err(e) => {
-                            *rename_once.borrow_mut() =
-                                Some((path, entry, dialog, window.clone(), tab));
-                            show_error(Some(&window), "Rename failed", &e);
-                        }
+                        });
+                    }
+                    Err(e) => {
+                        error.set_text(&e);
+                        error.set_visible(true);
+                        entry.add_css_class("error");
+                        entry.grab_focus();
+                        entry.select_region(0, -1);
+                        // Put state back so the user can fix the name and retry.
+                        *rename_once.borrow_mut() =
+                            Some((path, entry, dialog, error, tab));
                     }
                 }
             }
@@ -1744,6 +1805,7 @@ fn build_app_menu() -> (gio::Menu, gtk_theme::IconMenu) {
     icons.append_action(&go, "Parent Folder", "win.go-up");
     icons.append_action(&go, "Home", "win.go-home");
     icons.append_action(&go, "Enter Location…", "win.edit-location");
+    icons.append_action(&go, "Connect to Server…", "win.connect-server");
     menu.append_submenu(Some("_Go"), &go);
 
     icons.append_action(&menu, "Keyboard Shortcuts", "app.shortcuts");

@@ -18,6 +18,9 @@ pub struct PlacesData {
     pub recent_folders: Vec<PathBuf>,
     /// gtk-files-only bookmarks (not shared with Nautilus / gtk-3.0 bookmarks).
     pub bookmarks: Vec<Bookmark>,
+    /// Remembered remote servers (SFTP / FTP / SMB / …) for Connect to Network.
+    #[serde(default)]
+    pub network_connections: Vec<NetworkConnection>,
     /// One-time import from `~/.config/gtk-3.0/bookmarks` completed.
     pub bookmarks_imported_from_gtk: bool,
 }
@@ -30,6 +33,13 @@ pub struct Bookmark {
     /// Original URI (kept for remote bookmarks like sftp://).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
+    #[serde(default)]
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkConnection {
+    pub uri: String,
     #[serde(default)]
     pub label: String,
 }
@@ -64,6 +74,28 @@ pub fn load() -> PlacesData {
         (_, Some(_)) => true,
         _ => false,
     });
+    data.network_connections
+        .retain(|c| !c.uri.trim().is_empty());
+    // Seed remembered remotes from URI-only bookmarks once if empty.
+    if data.network_connections.is_empty() {
+        for bm in &data.bookmarks {
+            if let Some(uri) = &bm.uri {
+                if is_remote_uri(uri) {
+                    data.network_connections.push(NetworkConnection {
+                        uri: uri.clone(),
+                        label: if bm.label.is_empty() {
+                            uri.clone()
+                        } else {
+                            bm.label.clone()
+                        },
+                    });
+                }
+            }
+        }
+        if !data.network_connections.is_empty() {
+            save(&data);
+        }
+    }
 
     if !data.bookmarks_imported_from_gtk {
         let migrated = import_legacy_gtk_bookmarks();
@@ -239,6 +271,90 @@ pub fn add_bookmark(path: &Path) -> bool {
     data.bookmarks.push(bm);
     save(&data);
     true
+}
+
+/// Bookmark a remote URI (SFTP / FTP / SMB / …) for the sidebar.
+pub fn add_bookmark_uri(uri: &str, label: &str) -> bool {
+    let uri = uri.trim();
+    if uri.is_empty() {
+        return false;
+    }
+    let label = {
+        let t = label.trim();
+        if t.is_empty() {
+            uri.to_string()
+        } else {
+            t.to_string()
+        }
+    };
+    let bm = Bookmark {
+        path: None,
+        uri: Some(uri.to_string()),
+        label,
+    };
+    let mut data = load();
+    if data.bookmarks.iter().any(|e| bookmarks_equal(e, &bm)) {
+        return false;
+    }
+    data.bookmarks.push(bm);
+    save(&data);
+    true
+}
+
+fn is_remote_uri(uri: &str) -> bool {
+    let lower = uri.to_ascii_lowercase();
+    lower.starts_with("sftp://")
+        || lower.starts_with("ssh://")
+        || lower.starts_with("ftp://")
+        || lower.starts_with("ftps://")
+        || lower.starts_with("smb://")
+        || lower.starts_with("dav://")
+        || lower.starts_with("davs://")
+        || lower.starts_with("nfs://")
+}
+
+pub fn load_network_connections() -> Vec<NetworkConnection> {
+    load().network_connections
+}
+
+/// Remember a remote connection (most-recent first). Always updates label if URI exists.
+pub fn remember_network_connection(uri: &str, label: &str) -> bool {
+    let uri = uri.trim();
+    if uri.is_empty() || !is_remote_uri(uri) {
+        return false;
+    }
+    let label = {
+        let t = label.trim();
+        if t.is_empty() {
+            uri.to_string()
+        } else {
+            t.to_string()
+        }
+    };
+    let mut data = load();
+    data.network_connections.retain(|c| c.uri != uri);
+    data.network_connections.insert(
+        0,
+        NetworkConnection {
+            uri: uri.to_string(),
+            label,
+        },
+    );
+    // Cap list length.
+    data.network_connections.truncate(30);
+    save(&data);
+    true
+}
+
+pub fn forget_network_connection(uri: &str) -> bool {
+    let mut data = load();
+    let before = data.network_connections.len();
+    data.network_connections.retain(|c| c.uri != uri);
+    let removed = data.network_connections.len() != before;
+    if removed {
+        save(&data);
+    }
+    removed
 }
 
 #[allow(dead_code)]

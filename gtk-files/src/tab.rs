@@ -1236,14 +1236,24 @@ fn build_tree_column_view(
             let Some(row) = expander.child().and_downcast::<gtk::Box>() else {
                 return;
             };
-            let icon_overlay = row.first_child().and_downcast::<gtk::Overlay>().unwrap();
-            let icon = icon_overlay.first_child().and_downcast::<gtk::Image>().unwrap();
-            let symlink = overlay_badge(&icon_overlay, "symlink-emblem").unwrap();
-            let lock = overlay_badge(&icon_overlay, "lock-emblem").unwrap();
-            let label = icon_overlay
+            let Some(icon_overlay) = row.first_child().and_downcast::<gtk::Overlay>() else {
+                return;
+            };
+            let Some(icon) = icon_overlay.first_child().and_downcast::<gtk::Image>() else {
+                return;
+            };
+            let Some(symlink) = overlay_badge(&icon_overlay, "symlink-emblem") else {
+                return;
+            };
+            let Some(lock) = overlay_badge(&icon_overlay, "lock-emblem") else {
+                return;
+            };
+            let Some(label) = icon_overlay
                 .next_sibling()
                 .and_downcast::<gtk::Label>()
-                .unwrap();
+            else {
+                return;
+            };
             label.set_text(&display_name(&info));
             apply_item_tooltip(&row, &info);
             apply_symlink_emblem(&symlink, &info);
@@ -1532,14 +1542,24 @@ fn build_grid_view(
         let Some(box_) = item.child().and_downcast::<gtk::Box>() else {
             return;
         };
-        let icon_overlay = box_.first_child().and_downcast::<gtk::Overlay>().unwrap();
-        let icon = icon_overlay.first_child().and_downcast::<gtk::Image>().unwrap();
-        let symlink = overlay_badge(&icon_overlay, "symlink-emblem").unwrap();
-        let lock = overlay_badge(&icon_overlay, "lock-emblem").unwrap();
-        let label = icon_overlay
+        let Some(icon_overlay) = box_.first_child().and_downcast::<gtk::Overlay>() else {
+            return;
+        };
+        let Some(icon) = icon_overlay.first_child().and_downcast::<gtk::Image>() else {
+            return;
+        };
+        let Some(symlink) = overlay_badge(&icon_overlay, "symlink-emblem") else {
+            return;
+        };
+        let Some(lock) = overlay_badge(&icon_overlay, "lock-emblem") else {
+            return;
+        };
+        let Some(label) = icon_overlay
             .next_sibling()
             .and_downcast::<gtk::Label>()
-            .unwrap();
+        else {
+            return;
+        };
         label.set_text(&display_name(&info));
         apply_item_tooltip(&box_, &info);
 

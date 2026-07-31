@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use gtk4 as gtk;
+use gtk::gdk;
 use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
@@ -119,13 +120,18 @@ pub fn content_type_label(info: &gio::FileInfo) -> String {
 }
 
 pub fn icon_for_info(info: &gio::FileInfo, symbolic: bool) -> gio::Icon {
-    let base = if symbolic {
+    let raw = if symbolic {
         info.symbolic_icon()
             .or_else(|| info.icon())
-            .unwrap_or_else(|| fallback_icon(info))
     } else {
-        info.icon().unwrap_or_else(|| fallback_icon(info))
+        info.icon()
     };
+    // FileInfo often returns ThemedIcons (e.g. application-sql) that this
+    // theme does not ship — GTK then paints image-missing (🚫). Prefer the
+    // first name the theme actually has, else a plain text-file icon.
+    let base = raw
+        .and_then(|icon| usable_icon(icon))
+        .unwrap_or_else(|| fallback_icon(info));
 
     // Prefer overlay badges in the list/grid views; still attach emblems here
     // for any caller that renders GIcons directly (e.g. fallbacks).
@@ -141,6 +147,33 @@ pub fn icon_for_info(info: &gio::FileInfo, symbolic: bool) -> gio::Icon {
         icon = gio::EmblemedIcon::new(&icon, Some(&emblem)).upcast();
     }
     icon
+}
+
+fn icon_theme() -> gtk::IconTheme {
+    match gdk::Display::default() {
+        Some(d) => gtk::IconTheme::for_display(&d),
+        None => gtk::IconTheme::new(),
+    }
+}
+
+/// Return `icon` if the theme can paint it; for ThemedIcons, pick the first
+/// available name. Otherwise `None` so the caller can use a text-file fallback.
+fn usable_icon(icon: gio::Icon) -> Option<gio::Icon> {
+    let Some(themed) = icon.downcast_ref::<gio::ThemedIcon>() else {
+        // FileIcon / BytesIcon / custom — keep as-is.
+        return Some(icon);
+    };
+    let theme = icon_theme();
+    for name in themed.names() {
+        // Skip GTK's own missing-image sentinel names.
+        if name == "image-missing" || name == "gtk-missing-image" {
+            continue;
+        }
+        if theme.has_icon(&name) {
+            return Some(gio::ThemedIcon::new(&name).upcast());
+        }
+    }
+    None
 }
 
 fn fallback_icon(info: &gio::FileInfo) -> gio::Icon {

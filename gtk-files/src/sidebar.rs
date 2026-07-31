@@ -19,6 +19,8 @@ pub enum Place {
     /// Remote / non-local bookmark (e.g. sftp://).
     Uri(String),
     Trash,
+    /// Opens the remembered-network connections picker.
+    ConnectNetwork,
 }
 
 pub struct Sidebar {
@@ -185,6 +187,32 @@ impl Sidebar {
                 let row = make_mount_row(&mount, Rc::clone(self));
                 self.list.append(&row);
             }
+        }
+
+        // Network section is always shown: connect action + live mounts + ~/Network.
+        crate::network::sync_home_shortcuts();
+        let net_mounts = crate::network::network_mounts();
+        let network_home = crate::network::network_home_dir();
+        self.list.append(&make_header("Network"));
+        {
+            let place = Place::ConnectNetwork;
+            let row = make_row(
+                "network-server-symbolic",
+                "Connect to Network…",
+                place.clone(),
+            );
+            // No context menu / middle-click tab for the action row.
+            self.list.append(&row);
+        }
+        if network_home.is_dir() {
+            let place = Place::Path(network_home.clone());
+            let row = make_row("network-workgroup-symbolic", "Network Home", place.clone());
+            install_place_context_menu(&row, place, Rc::clone(self), None);
+            self.list.append(&row);
+        }
+        for mount in net_mounts {
+            let row = make_network_mount_row(&mount, Rc::clone(self));
+            self.list.append(&row);
         }
 
         let data = places::load();
@@ -399,14 +427,26 @@ fn make_row(icon: &str, label: &str, place: Place) -> gtk::ListBoxRow {
     row.set_widget_name(match &place {
         Place::Path(_) | Place::Uri(_) => "place",
         Place::Trash => "trash",
+        Place::ConnectNetwork => "connect-network",
     });
     set_row_place(&row, place);
     row
 }
 
 fn make_mount_row(mount: &gio::Mount, sidebar: Rc<Sidebar>) -> gtk::ListBoxRow {
+    make_mount_row_with_icon(mount, sidebar, &mount_icon_name(mount))
+}
+
+fn make_network_mount_row(mount: &gio::Mount, sidebar: Rc<Sidebar>) -> gtk::ListBoxRow {
+    make_mount_row_with_icon(mount, sidebar, crate::network::network_mount_icon(mount))
+}
+
+fn make_mount_row_with_icon(
+    mount: &gio::Mount,
+    sidebar: Rc<Sidebar>,
+    icon_name: &str,
+) -> gtk::ListBoxRow {
     let name = mount.name().to_string();
-    let icon_name = mount_icon_name(mount);
     let root = mount.root();
     let place = root
         .path()
@@ -420,7 +460,7 @@ fn make_mount_row(mount: &gio::Mount, sidebar: Rc<Sidebar>) -> gtk::ListBoxRow {
     box_.set_margin_top(2);
     box_.set_margin_bottom(2);
 
-    let image = gtk::Image::from_icon_name(&icon_name);
+    let image = gtk::Image::from_icon_name(icon_name);
     let lbl = gtk::Label::new(Some(&name));
     lbl.set_xalign(0.0);
     lbl.set_hexpand(true);
@@ -433,7 +473,7 @@ fn make_mount_row(mount: &gio::Mount, sidebar: Rc<Sidebar>) -> gtk::ListBoxRow {
         let eject = gtk::Button::from_icon_name("media-eject-symbolic");
         eject.add_css_class("flat");
         eject.add_css_class("circular");
-        eject.set_tooltip_text(Some("Eject"));
+        eject.set_tooltip_text(Some("Disconnect"));
         eject.set_valign(gtk::Align::Center);
         eject.set_focus_on_click(false);
         let mount = mount.clone();
@@ -650,6 +690,7 @@ fn set_row_place(row: &gtk::ListBoxRow, place: Place) {
         Place::Trash => "trash".to_string(),
         Place::Path(p) => format!("path:{}", p.to_string_lossy()),
         Place::Uri(u) => format!("uri:{u}"),
+        Place::ConnectNetwork => "connect-network".to_string(),
     };
     unsafe {
         row.set_data("gtk-files-place", encoded);
@@ -667,6 +708,9 @@ fn row_place(row: &gtk::ListBoxRow) -> Option<Place> {
             if encoded == "trash" {
                 return Some(Place::Trash);
             }
+            if encoded == "connect-network" {
+                return Some(Place::ConnectNetwork);
+            }
             if let Some(rest) = encoded.strip_prefix("path:") {
                 return Some(Place::Path(PathBuf::from(rest)));
             }
@@ -677,6 +721,9 @@ fn row_place(row: &gtk::ListBoxRow) -> Option<Place> {
     }
     if name == "trash" {
         return Some(Place::Trash);
+    }
+    if name == "connect-network" {
+        return Some(Place::ConnectNetwork);
     }
     None
 }
