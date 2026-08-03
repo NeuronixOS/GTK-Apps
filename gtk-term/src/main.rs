@@ -248,6 +248,7 @@ fn build_window_shell(
     main_box.append(&notebook);
 
     let header = gtk::HeaderBar::new();
+    gtk_theme::prepare_headerbar(&header);
 
     let new_tab_btn = gtk::Button::from_icon_name("tab-new-symbolic");
     new_tab_btn.set_tooltip_text(Some("New Tab (Ctrl+Shift+T)"));

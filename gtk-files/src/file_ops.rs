@@ -1,6 +1,11 @@
 //! File operations: copy, move, trash, delete, rename, mkdir, link.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Instant;
 
 use gtk4 as gtk;
 use gtk::gio;
@@ -268,22 +273,101 @@ pub fn empty_trash(parent: Option<&impl IsA<gtk::Window>>, on_done: impl FnOnce(
 }
 
 fn copy_recursive(src: &Path, dest: &Path) -> Result<(), String> {
+    copy_recursive_progressive(src, dest, &mut |_| Ok(()))
+}
+
+fn copy_recursive_progressive(
+    src: &Path,
+    dest: &Path,
+    on_bytes: &mut dyn FnMut(u64) -> Result<(), String>,
+) -> Result<(), String> {
     if src.is_dir() {
         std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
         for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
             let entry = entry.map_err(|e| e.to_string())?;
             let name = entry.file_name();
-            copy_recursive(&entry.path(), &dest.join(name))?;
+            copy_recursive_progressive(&entry.path(), &dest.join(name), on_bytes)?;
         }
         Ok(())
     } else {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        std::fs::copy(src, dest).map_err(|e| e.to_string())?;
-        Ok(())
+        copy_file_chunked(src, dest, on_bytes)
     }
 }
+
+fn copy_file_chunked(
+    src: &Path,
+    dest: &Path,
+    on_bytes: &mut dyn FnMut(u64) -> Result<(), String>,
+) -> Result<(), String> {
+    use std::io::{Read, Write};
+
+    let mut reader = std::fs::File::open(src).map_err(|e| e.to_string())?;
+    let mut writer = std::fs::File::create(dest).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; 1024 * 1024];
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        writer.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        on_bytes(n as u64)?;
+    }
+    writer.flush().map_err(|e| e.to_string())?;
+    if let Ok(meta) = std::fs::metadata(src) {
+        let _ = std::fs::set_permissions(dest, meta.permissions());
+    }
+    Ok(())
+}
+
+fn path_byte_size(path: &Path) -> u64 {
+    if path.is_file() {
+        return std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    }
+    if !path.is_dir() {
+        return 0;
+    }
+    let mut total = 0u64;
+    let walker = walkdir_or_manual(path);
+    for p in walker {
+        if let Ok(meta) = std::fs::metadata(&p) {
+            if meta.is_file() {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    total
+}
+
+fn walkdir_or_manual(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+#[derive(Clone)]
+struct ProgressUpdate {
+    fraction: f64,
+    title: String,
+    detail: String,
+}
+
+const PROGRESS_THRESHOLD_BYTES: u64 = 512 * 1024;
 
 pub fn paste_into(
     parent: Option<&impl IsA<gtk::Window>>,
@@ -295,14 +379,17 @@ pub fn paste_into(
         on_done();
         return;
     };
-    drop_into(parent, dest_dir, &paths, op == ClipOp::Cut, || {});
-    if op == ClipOp::Cut {
-        clear_after_cut_paste(clip);
-    }
-    on_done();
+    let clip = Rc::clone(clip);
+    drop_into(parent, dest_dir, &paths, op == ClipOp::Cut, move || {
+        if op == ClipOp::Cut {
+            clear_after_cut_paste(&clip);
+        }
+        on_done();
+    });
 }
 
 /// Copy or move `paths` into `dest_dir` (used by paste and drag-and-drop).
+/// Large jobs run off the UI thread with a non-blocking sidebar progress panel.
 pub fn drop_into(
     parent: Option<&impl IsA<gtk::Window>>,
     dest_dir: &Path,
@@ -316,42 +403,263 @@ pub fn drop_into(
     }
     let parent_win = parent.map(|w| w.clone().upcast::<gtk::Window>());
     let dest_dir = dest_dir.to_path_buf();
+    let paths: Vec<PathBuf> = paths.to_vec();
 
-    for src in paths {
-        // Cut into the same folder is a no-op. Copy into the same folder still
-        // proceeds — uniquify_path makes "name (1).ext" so Ctrl+V duplicates.
-        if move_files && src.parent().is_some_and(|p| p == dest_dir) {
-            continue;
-        }
-        let name = src
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "item".into());
-        let dest = uniquify_path(&dest_dir, &name);
-        let result = if move_files {
-            if std::fs::rename(src, &dest).is_ok() {
-                Ok(())
-            } else {
-                copy_recursive(src, &dest).and_then(|_| {
-                    if src.is_dir() {
-                        std::fs::remove_dir_all(src).map_err(|e| e.to_string())
-                    } else {
-                        std::fs::remove_file(src).map_err(|e| e.to_string())
-                    }
-                })
+    let jobs: Vec<(PathBuf, PathBuf)> = paths
+        .iter()
+        .filter_map(|src| {
+            if move_files && src.parent().is_some_and(|p| p == dest_dir) {
+                return None;
             }
-        } else {
-            copy_recursive(src, &dest)
-        };
-        if let Err(e) = result {
-            show_error(
-                parent_win.as_ref(),
-                if move_files { "Move failed" } else { "Copy failed" },
-                &format!("{} → {}: {e}", src.display(), dest.display()),
-            );
-        }
+            let name = src
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "item".into());
+            let dest = uniquify_path(&dest_dir, &name);
+            Some((src.clone(), dest))
+        })
+        .collect();
+
+    if jobs.is_empty() {
+        on_done();
+        return;
     }
-    on_done();
+
+    let total_bytes: u64 = jobs.iter().map(|(src, _)| path_byte_size(src)).sum();
+    let show_progress = total_bytes >= PROGRESS_THRESHOLD_BYTES || jobs.len() > 3;
+
+    if !show_progress {
+        // Tiny jobs: keep the old synchronous path (feels instant).
+        for (src, dest) in &jobs {
+            let result = transfer_one(src, dest, move_files, &mut |_| Ok(()));
+            if let Err(e) = result {
+                show_error(
+                    parent_win.as_ref(),
+                    if move_files { "Move failed" } else { "Copy failed" },
+                    &format!("{} → {}: {e}", src.display(), dest.display()),
+                );
+            }
+        }
+        on_done();
+        return;
+    }
+
+    run_transfer_with_progress(parent_win.as_ref(), jobs, move_files, total_bytes, on_done);
+}
+
+fn transfer_one(
+    src: &Path,
+    dest: &Path,
+    move_files: bool,
+    on_bytes: &mut dyn FnMut(u64) -> Result<(), String>,
+) -> Result<(), String> {
+    if move_files {
+        if std::fs::rename(src, dest).is_ok() {
+            // Same-volume rename: count full size as done.
+            let _ = on_bytes(path_byte_size(src));
+            return Ok(());
+        }
+        copy_recursive_progressive(src, dest, on_bytes).and_then(|_| {
+            if src.is_dir() {
+                std::fs::remove_dir_all(src).map_err(|e| e.to_string())
+            } else {
+                std::fs::remove_file(src).map_err(|e| e.to_string())
+            }
+        })
+    } else {
+        copy_recursive_progressive(src, dest, on_bytes)
+    }
+}
+
+fn format_bytes(n: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let n = n as f64;
+    if n >= GB {
+        format!("{:.1} GB", n / GB)
+    } else if n >= MB {
+        format!("{:.1} MB", n / MB)
+    } else if n >= KB {
+        format!("{:.0} KB", n / KB)
+    } else {
+        format!("{n:.0} B")
+    }
+}
+
+fn format_duration(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{h}h {m:02}m {s:02}s")
+    } else if m > 0 {
+        format!("{m}m {s:02}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
+fn run_transfer_with_progress(
+    parent: Option<&gtk::Window>,
+    jobs: Vec<(PathBuf, PathBuf)>,
+    move_files: bool,
+    total_bytes: u64,
+    on_done: impl FnOnce() + 'static,
+) {
+    use gtk::glib;
+
+    let panel = crate::transfer_panel::active();
+    let cancelled = if let Some(ref panel) = panel {
+        match panel.begin(move_files) {
+            Some(flag) => flag,
+            None => {
+                show_error(
+                    parent,
+                    if move_files { "Move" } else { "Copy" },
+                    "Another file transfer is already in progress.",
+                );
+                on_done();
+                return;
+            }
+        }
+    } else {
+        Arc::new(AtomicBool::new(false))
+    };
+
+    let verb = if move_files { "Moving" } else { "Copying" };
+    let (tx, rx) = std::sync::mpsc::channel::<Result<ProgressUpdate, String>>();
+    let cancelled_worker = Arc::clone(&cancelled);
+    let total = total_bytes.max(1);
+
+    thread::spawn(move || {
+        let started = Instant::now();
+        let mut done_bytes = 0u64;
+        let job_count = jobs.len();
+
+        for (i, (src, dest)) in jobs.into_iter().enumerate() {
+            if cancelled_worker.load(Ordering::SeqCst) {
+                let _ = tx.send(Err("Cancelled".into()));
+                return;
+            }
+            let name = src
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| src.display().to_string());
+            let _ = tx.send(Ok(ProgressUpdate {
+                fraction: done_bytes as f64 / total as f64,
+                title: format!("{verb} “{name}” ({}/{job_count})", i + 1),
+                detail: format!(
+                    "{} / {}  ·  elapsed {}",
+                    format_bytes(done_bytes),
+                    format_bytes(total),
+                    format_duration(started.elapsed().as_secs())
+                ),
+            }));
+
+            let tx_prog = tx.clone();
+            let cancelled = Arc::clone(&cancelled_worker);
+            let verb = verb.to_string();
+            let name_c = name.clone();
+            let result = transfer_one(&src, &dest, move_files, &mut |n| {
+                if cancelled.load(Ordering::SeqCst) {
+                    return Err("Cancelled".into());
+                }
+                done_bytes = done_bytes.saturating_add(n);
+                let elapsed = started.elapsed().as_secs_f64().max(0.001);
+                let rate = done_bytes as f64 / elapsed;
+                let remain = total.saturating_sub(done_bytes);
+                let eta = if rate > 1.0 {
+                    format_duration((remain as f64 / rate) as u64)
+                } else {
+                    "…".into()
+                };
+                let _ = tx_prog.send(Ok(ProgressUpdate {
+                    fraction: (done_bytes as f64 / total as f64).clamp(0.0, 1.0),
+                    title: format!("{verb} “{name_c}” ({}/{job_count})", i + 1),
+                    detail: format!(
+                        "{} / {}  ·  {}/s  ·  ~{} left",
+                        format_bytes(done_bytes),
+                        format_bytes(total),
+                        format_bytes(rate as u64),
+                        eta
+                    ),
+                }));
+                Ok(())
+            });
+
+            if let Err(e) = result {
+                if e == "Cancelled" {
+                    let _ = std::fs::remove_file(&dest);
+                    let _ = std::fs::remove_dir_all(&dest);
+                    let _ = tx.send(Err("Cancelled".into()));
+                    return;
+                }
+                let _ = tx.send(Err(format!("{} → {}: {e}", src.display(), dest.display())));
+                return;
+            }
+        }
+
+        let _ = tx.send(Ok(ProgressUpdate {
+            fraction: 1.0,
+            title: if move_files {
+                "Move complete".into()
+            } else {
+                "Copy complete".into()
+            },
+            detail: format!(
+                "{} in {}",
+                format_bytes(done_bytes.max(total_bytes)),
+                format_duration(started.elapsed().as_secs())
+            ),
+        }));
+        let _ = tx.send(Err(String::new())); // sentinel: success
+    });
+
+    let parent_c = parent.cloned();
+    let mut on_done = Some(on_done);
+    let move_files = move_files;
+
+    glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+        let mut finished = false;
+        let mut fatal: Option<String> = None;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                Ok(upd) => {
+                    if let Some(ref panel) = panel {
+                        panel.update(&upd.title, &upd.detail, upd.fraction);
+                    }
+                }
+                Err(e) if e.is_empty() => {
+                    finished = true;
+                }
+                Err(e) => {
+                    fatal = Some(e);
+                    finished = true;
+                }
+            }
+        }
+        if finished {
+            if let Some(ref panel) = panel {
+                panel.finish();
+            }
+            if let Some(err) = fatal {
+                if err != "Cancelled" {
+                    show_error(
+                        parent_c.as_ref(),
+                        if move_files { "Move failed" } else { "Copy failed" },
+                        &err,
+                    );
+                }
+            }
+            if let Some(cb) = on_done.take() {
+                cb();
+            }
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
 }
 
 pub fn create_link(src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {

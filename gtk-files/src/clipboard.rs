@@ -1,7 +1,7 @@
 //! Cut / copy / paste clipboard for files.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gtk4 as gtk;
@@ -36,12 +36,50 @@ impl ClipboardState {
 
 pub type SharedClipboard = Rc<RefCell<ClipboardState>>;
 
+thread_local! {
+    static ACTIVE: RefCell<Option<SharedClipboard>> = const { RefCell::new(None) };
+}
+
+/// Register the app-wide clipboard so list/grid binds can style cut items.
+pub fn set_active(clip: SharedClipboard) {
+    ACTIVE.with(|a| *a.borrow_mut() = Some(clip));
+}
+
 pub fn new_shared() -> SharedClipboard {
-    Rc::new(RefCell::new(ClipboardState::default()))
+    let clip = Rc::new(RefCell::new(ClipboardState::default()));
+    set_active(Rc::clone(&clip));
+    clip
 }
 
 pub fn is_empty(clip: &SharedClipboard) -> bool {
     clip.borrow().is_empty()
+}
+
+/// True when `path` is in the current Cut set (semi-transparent until paste).
+pub fn is_path_cut(path: &Path) -> bool {
+    ACTIVE.with(|a| {
+        let active = a.borrow();
+        let Some(clip) = active.as_ref() else {
+            return false;
+        };
+        let st = clip.borrow();
+        if st.op != Some(ClipOp::Cut) {
+            return false;
+        }
+        st.paths.iter().any(|p| paths_match(p, path))
+    })
+}
+
+fn paths_match(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    // DirectoryList / selection can disagree on trailing separators or
+    // relative vs absolute forms — compare canonical paths when possible.
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
 }
 
 pub fn set_files(
@@ -50,6 +88,7 @@ pub fn set_files(
     op: ClipOp,
     widget: &impl IsA<gtk::Widget>,
 ) {
+    set_active(Rc::clone(clip));
     {
         let mut st = clip.borrow_mut();
         st.paths = paths.clone();

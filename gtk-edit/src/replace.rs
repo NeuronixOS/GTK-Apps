@@ -7,6 +7,7 @@ use gtk::prelude::*;
 use sourceview5::prelude::*;
 
 use crate::config::Config;
+use crate::search::search_iter;
 
 pub struct ReplaceDialog {
     pub dialog: gtk::Window,
@@ -99,8 +100,11 @@ impl ReplaceDialog {
         })
     }
 
-    pub fn present(&self, config: &Config) {
-        if let Some(last) = config.state.search_history.first() {
+    /// Show the dialog. `initial_search` (e.g. current selection) wins over history.
+    pub fn present_with(&self, config: &Config, initial_search: Option<&str>) {
+        if let Some(text) = initial_search.filter(|t| !t.is_empty()) {
+            self.search_entry.set_text(text);
+        } else if let Some(last) = config.state.search_history.first() {
             self.search_entry.set_text(last);
         }
         if let Some(last) = config.state.replace_history.first() {
@@ -108,6 +112,7 @@ impl ReplaceDialog {
         }
         self.dialog.present();
         self.search_entry.grab_focus();
+        self.search_entry.select_region(0, -1);
     }
 
     fn settings(&self) -> sourceview5::SearchSettings {
@@ -122,10 +127,10 @@ impl ReplaceDialog {
 
     pub fn find_next(&self, buffer: &sourceview5::Buffer, view: &sourceview5::View) -> bool {
         let settings = self.settings();
+        // Wrap is on by default; keep pressing Find cycles through all hits.
         let context = sourceview5::SearchContext::new(buffer, Some(&settings));
         context.set_highlight(true);
-        let insert = buffer.get_insert();
-        let iter = buffer.iter_at_mark(&insert);
+        let iter = search_iter(buffer, true);
         if let Some((start, end, _)) = context.forward(&iter) {
             buffer.select_range(&start, &end);
             view.scroll_to_iter(&mut start.clone(), 0.2, false, 0.0, 0.0);

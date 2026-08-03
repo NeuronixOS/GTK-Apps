@@ -87,13 +87,15 @@ impl EditorTab {
         page.add_css_class("gtk-content");
         page.append(&paned);
 
-        // Notebook tab labels with ellipsize and no width hint get ~0px and show
-        // only "…". Keep a readable minimum and cap long names at the end.
+        // Tab labels ellipsize inside the expanded tab slot (tab-expand on the
+        // notebook page). Keep a small width_chars floor so empty titles don't
+        // collapse; avoid size-requests that can grow the window.
         let label = gtk::Label::builder()
             .label("Untitled")
             .ellipsize(gtk::pango::EllipsizeMode::End)
-            .width_chars(8)
-            .max_width_chars(32)
+            .width_chars(4)
+            .hexpand(true)
+            .halign(gtk::Align::Fill)
             .single_line_mode(true)
             .xalign(0.0)
             .build();
@@ -101,10 +103,13 @@ impl EditorTab {
         close.add_css_class("flat");
         close.add_css_class("small-button");
         close.set_focusable(false);
+        close.set_hexpand(false);
         close.set_valign(gtk::Align::Center);
 
         let tab_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        tab_box.set_hexpand(false);
+        tab_box.set_hexpand(true);
+        tab_box.set_halign(gtk::Align::Fill);
+        tab_box.set_valign(gtk::Align::Fill);
         tab_box.append(&label);
         tab_box.append(&close);
 
@@ -261,29 +266,130 @@ pub fn apply_view_config(view: &sourceview5::View, cfg: &EditorConfig) {
 pub struct TabNotebook {
     pub notebook: gtk::Notebook,
     pub tabs: RefCell<Vec<Rc<EditorTab>>>,
+    /// Dummy page whose tab label is the compact "+" after the last document.
+    plus_page: gtk::Box,
+    /// Invoked when the trailing "+" control is clicked (set by the window).
+    on_plus: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
 }
 
 impl TabNotebook {
     pub fn new() -> Rc<Self> {
         let notebook = gtk::Notebook::new();
+        // tab-expand shares leftover bar space; scrollable keeps overflow on-screen.
         notebook.set_scrollable(true);
         notebook.set_vexpand(true);
         notebook.set_hexpand(true);
+        notebook.add_css_class("gtk-edit-tabs");
+
+        // Button (not a plain label): when "+" is already the current page
+        // (e.g. empty window), switch-page never fires — the click must create
+        // a document itself. Keep it as a real notebook tab so it sits beside
+        // the last document rather than as an action-end widget.
+        // Compact fixed-width "+": does not expand. Document tabs share the
+        // leftover bar via tab-expand (gedit-style).
+        let plus_btn = gtk::Button::builder()
+            .label("+")
+            .has_frame(false)
+            .focus_on_click(false)
+            .can_focus(false)
+            .hexpand(false)
+            .vexpand(true)
+            .halign(gtk::Align::Fill)
+            .valign(gtk::Align::Fill)
+            .build();
+        plus_btn.add_css_class("flat");
+        plus_btn.add_css_class("gtk-edit-new-tab-label");
+        plus_btn.set_tooltip_text(Some("New document"));
+
+        let plus_tab = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        plus_tab.set_hexpand(false);
+        plus_tab.set_vexpand(true);
+        plus_tab.set_halign(gtk::Align::Fill);
+        plus_tab.set_valign(gtk::Align::Fill);
+        plus_tab.add_css_class("gtk-edit-new-tab");
+        plus_tab.append(&plus_btn);
+
+        let on_plus: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+        {
+            let on_plus = Rc::clone(&on_plus);
+            plus_btn.connect_clicked(move |_| {
+                if let Some(cb) = on_plus.borrow().clone() {
+                    cb();
+                }
+            });
+        }
+
+        let plus_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        plus_page.add_css_class("gtk-content");
+        notebook.append_page(&plus_page, Some(&plus_tab));
+        notebook.set_tab_reorderable(&plus_page, false);
+        notebook.set_tab_label(&plus_page, Some(&plus_tab));
+        {
+            let page = notebook.page(&plus_page);
+            page.set_tab_expand(false);
+            page.set_tab_fill(true);
+        }
+
+        {
+            let plus = plus_page.clone();
+            notebook.connect_page_reordered(move |nb, _, _| {
+                let Some(want) = nb.n_pages().checked_sub(1) else {
+                    return;
+                };
+                if nb.page_num(&plus) != Some(want) {
+                    nb.reorder_child(&plus, None);
+                }
+            });
+        }
+
         Rc::new(Self {
             notebook,
             tabs: RefCell::new(Vec::new()),
+            plus_page,
+            on_plus,
         })
+    }
+
+    pub fn set_on_plus<F: Fn() + 'static>(&self, f: F) {
+        *self.on_plus.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// True when `page` is the trailing "+" tab (not a document).
+    pub fn is_plus_page(&self, page: u32) -> bool {
+        self.notebook.page_num(&self.plus_page) == Some(page)
     }
 
     pub fn add_tab(&self, tab: Rc<EditorTab>) -> u32 {
         tab.refresh_title();
-        let idx = self.notebook.append_page(&tab.page, Some(&tab.tab_box));
+        // Keep "+" as the last tab: insert documents just before it.
+        let plus_idx = self
+            .notebook
+            .page_num(&self.plus_page)
+            .unwrap_or_else(|| self.notebook.n_pages());
+        let idx = self
+            .notebook
+            .insert_page(&tab.page, Some(&tab.tab_box), Some(plus_idx));
         self.notebook.set_tab_reorderable(&tab.page, true);
         // Ensure GTK keeps our custom label widget (not a truncated fallback).
         self.notebook.set_tab_label(&tab.page, Some(&tab.tab_box));
-        self.tabs.borrow_mut().push(Rc::clone(&tab));
+        {
+            let page = self.notebook.page(&tab.page);
+            page.set_tab_expand(true);
+            page.set_tab_fill(true);
+        }
+        self.tabs.borrow_mut().insert(plus_idx as usize, Rc::clone(&tab));
         self.notebook.set_current_page(Some(idx));
+        self.ensure_plus_last();
         idx
+    }
+
+    fn ensure_plus_last(&self) {
+        let Some(want) = self.notebook.n_pages().checked_sub(1) else {
+            return;
+        };
+        if self.notebook.page_num(&self.plus_page) != Some(want) {
+            self.notebook.reorder_child(&self.plus_page, None);
+        }
     }
 
     pub fn current(&self) -> Option<Rc<EditorTab>> {

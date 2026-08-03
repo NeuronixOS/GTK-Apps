@@ -14,10 +14,13 @@ mod properties;
 mod scripts;
 mod search;
 mod sidebar;
+mod sync_setup;
+mod sync_status;
 mod tab;
 mod templates;
 mod terminal_panel;
 mod thumbnails;
+mod transfer_panel;
 mod util;
 mod window;
 
@@ -370,11 +373,41 @@ fn load_css() {
         }
         /* Corner badges overlaid on file/folder icons. */
         .symlink-emblem,
-        .lock-emblem {
+        .lock-emblem,
+        .sync-emblem {
             background-color: @theme_base_color;
             border-radius: 9999px;
             padding: 1px;
             box-shadow: 0 0 1px alpha(@theme_fg_color, 0.6);
+        }
+        .file-row-content.sync-deleted {
+            opacity: 0.55;
+        }
+        .file-row-content.clipboard-cut {
+            opacity: 0.4;
+        }
+        .file-row-content.clipboard-cut image,
+        .file-row-content.clipboard-cut label {
+            opacity: 0.4;
+        }
+        .sync-header-status {
+            margin-end: 4px;
+            opacity: 0.9;
+            min-width: 220px;
+        }
+        .sync-header-status label,
+        .sync-header-label {
+            margin: 0;
+            font-family: monospace;
+        }
+        /* Copy/move progress docked under Places (non-modal). */
+        .transfer-panel {
+            border-top: 1px solid alpha(@theme_fg_color, 0.15);
+            padding-top: 6px;
+        }
+        .transfer-panel progressbar {
+            margin-top: 2px;
+            margin-bottom: 2px;
         }
         ",
     );

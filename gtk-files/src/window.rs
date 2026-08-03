@@ -24,6 +24,8 @@ use crate::properties;
 use crate::scripts::{self, ConvertFormat};
 use crate::search::SearchBar;
 use crate::sidebar::{Place, Sidebar};
+use crate::sync_setup;
+use crate::sync_status;
 use crate::tab::{FolderTab, ViewMode};
 use crate::templates;
 use crate::terminal_panel::TerminalPanel;
@@ -52,6 +54,10 @@ pub struct FilesWindow {
     /// Paths captured when a file-view context menu opens (selection can clear
     /// when the popover steals focus).
     context_paths: RefCell<Option<Vec<PathBuf>>>,
+    /// Header chip left of search: syncing status + current file names.
+    sync_header: gtk::Box,
+    sync_header_icon: gtk::Image,
+    sync_header_label: gtk::Label,
 }
 
 impl FilesWindow {
@@ -69,6 +75,7 @@ impl FilesWindow {
             .build();
 
         let header = gtk::HeaderBar::new();
+        gtk_theme::prepare_headerbar(&header);
 
         let back_btn = gtk::Button::from_icon_name("go-previous-symbolic");
         back_btn.set_tooltip_text(Some("Back"));
@@ -86,7 +93,13 @@ impl FilesWindow {
         header.pack_start(&nav);
 
         let pathbar = PathBar::new();
-        header.set_title_widget(Some(&pathbar.root));
+        // Keep breadcrumbs on the left (not as a centered title widget) so the
+        // sync chip on the right can update without shifting folder location.
+        pathbar.root.set_hexpand(true);
+        pathbar.root.set_halign(gtk::Align::Fill);
+        pathbar.root.set_margin_start(8);
+        pathbar.root.set_margin_end(8);
+        header.pack_start(&pathbar.root);
 
         let search_btn = gtk::Button::from_icon_name("edit-find-symbolic");
         search_btn.set_tooltip_text(Some("Search current folder"));
@@ -94,6 +107,29 @@ impl FilesWindow {
         view_btn.set_tooltip_text(Some("Toggle list/grid view"));
         let new_folder_btn = gtk::Button::from_icon_name("folder-new-symbolic");
         new_folder_btn.set_tooltip_text(Some("New folder"));
+
+        let sync_header_icon = gtk::Image::from_icon_name("view-refresh-symbolic");
+        sync_header_icon.set_pixel_size(16);
+        sync_header_icon.set_halign(gtk::Align::Start);
+        let sync_header_label = gtk::Label::new(None);
+        sync_header_label.add_css_class("caption");
+        sync_header_label.add_css_class("sync-header-label");
+        sync_header_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        // Fixed character cell so filename changes do not reflow the header.
+        sync_header_label.set_width_chars(24);
+        sync_header_label.set_max_width_chars(24);
+        sync_header_label.set_xalign(0.0);
+        sync_header_label.set_halign(gtk::Align::Start);
+        let sync_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        sync_header.add_css_class("sync-header-status");
+        sync_header.set_valign(gtk::Align::Center);
+        sync_header.set_halign(gtk::Align::End);
+        // Icon (16) + spacing (6) + ~24 monospace cells — keep allocation stable.
+        sync_header.set_size_request(220, -1);
+        sync_header.set_hexpand(false);
+        sync_header.append(&sync_header_icon);
+        sync_header.append(&sync_header_label);
+        sync_header.set_visible(false);
 
         let (app_menu, app_icons) = build_app_menu();
         let menu_btn = gtk::MenuButton::builder()
@@ -106,6 +142,8 @@ impl FilesWindow {
         header.pack_end(&view_btn);
         header.pack_end(&new_folder_btn);
         header.pack_end(&search_btn);
+        // Fixed-width chip immediately left of the magnifying-glass.
+        header.pack_end(&sync_header);
         window.set_titlebar(Some(&header));
 
         let sidebar = Sidebar::new();
@@ -192,7 +230,10 @@ impl FilesWindow {
         let fw = Rc::new(Self {
             window: window.clone(),
             config: Rc::clone(&config),
-            clipboard,
+            clipboard: {
+                clipboard::set_active(Rc::clone(&clipboard));
+                clipboard
+            },
             notebook: notebook.clone(),
             tabs: RefCell::new(Vec::new()),
             sidebar: Rc::clone(&sidebar),
@@ -207,8 +248,12 @@ impl FilesWindow {
             paned: paned.clone(),
             content_paned: content_paned.clone(),
             context_paths: RefCell::new(None),
+            sync_header: sync_header.clone(),
+            sync_header_icon: sync_header_icon.clone(),
+            sync_header_label: sync_header_label.clone(),
         });
         *fw_slot.borrow_mut() = Some(Rc::clone(&fw));
+        fw.update_sync_header();
 
         // Place the divider so the bottom tools keep their configured height.
         {
@@ -244,6 +289,41 @@ impl FilesWindow {
             let fw2 = Rc::clone(&fw);
             sidebar.set_on_open_window(move |place| {
                 fw2.open_place_in_new_window(&place);
+            });
+        }
+        {
+            let fw2 = Rc::clone(&fw);
+            sidebar.set_on_remove_sync_client(move || {
+                let fw3 = Rc::clone(&fw2);
+                sync_setup::confirm_remove_client(Some(&fw2.window), move || {
+                    fw3.sidebar.rebuild();
+                    fw3.sidebar.refresh_sync_soon();
+                });
+            });
+        }
+        {
+            let fw2 = Rc::clone(&fw);
+            sidebar.set_on_remove_sync_server(move || {
+                let fw3 = Rc::clone(&fw2);
+                sync_setup::confirm_remove_server(Some(&fw2.window), move || {
+                    fw3.sidebar.refresh_sync_soon();
+                });
+            });
+        }
+        {
+            let fw2 = Rc::clone(&fw);
+            sidebar.set_on_client_status(move || {
+                for tab in fw2.tabs.borrow().iter() {
+                    tab.refresh_sync_ui();
+                }
+                fw2.update_sync_header();
+            });
+        }
+        {
+            let fw2 = Rc::clone(&fw);
+            sync_setup::set_on_setup_progress(move || {
+                fw2.sidebar.rebuild();
+                fw2.sidebar.refresh_sync_if_changed();
             });
         }
         {
@@ -471,13 +551,6 @@ impl FilesWindow {
             .unwrap_or_else(|| self.current_tab().selected_paths())
     }
 
-    fn target_files(&self) -> Vec<gio::File> {
-        self.target_paths()
-            .into_iter()
-            .map(gio::File::for_path)
-            .collect()
-    }
-
     pub fn current_tab(&self) -> Rc<FolderTab> {
         // Resolve by notebook page widget — tab reorder would desync a Vec index.
         let page = self.notebook.current_page().unwrap_or(0);
@@ -521,6 +594,31 @@ impl FilesWindow {
         }
         self.back_btn.set_sensitive(tab.can_back());
         self.forward_btn.set_sensitive(tab.can_forward());
+        self.update_sync_header();
+    }
+
+    /// Update the header-bar sync chip (fixed on the right of the path bar).
+    pub fn update_sync_header(&self) {
+        let Some(status) = sync_status::load_client_status() else {
+            self.sync_header.set_visible(false);
+            return;
+        };
+        // Only show when a client is configured / status file is live.
+        if sync_status::client_sync_root().is_none() {
+            self.sync_header.set_visible(false);
+            return;
+        }
+        let Some(msg) = status.header_message() else {
+            self.sync_header.set_visible(false);
+            return;
+        };
+        // Text is already padded to a fixed width; keep icon stable while busy
+        // so the chip allocation does not twitch between files.
+        self.sync_header_label.set_text(&msg);
+        self.sync_header.set_tooltip_text(Some(&status.header_tooltip()));
+        self.sync_header_icon
+            .set_icon_name(Some("view-refresh-symbolic"));
+        self.sync_header.set_visible(true);
     }
 
     fn place_to_file(place: &Place) -> gio::File {
@@ -528,7 +626,9 @@ impl FilesWindow {
             Place::Path(p) => gio::File::for_path(p),
             Place::Uri(uri) => gio::File::for_uri(uri),
             Place::Trash => util::trash_file(),
-            Place::ConnectNetwork => gio::File::for_path(network::network_home_dir()),
+            Place::ConnectNetwork | Place::SetupSync => {
+                gio::File::for_path(network::network_home_dir())
+            }
         }
     }
 
@@ -536,6 +636,10 @@ impl FilesWindow {
         match place {
             Place::ConnectNetwork => {
                 self.action_connect_server();
+                return;
+            }
+            Place::SetupSync => {
+                self.action_setup_sync();
                 return;
             }
             Place::Path(p) => self.current_tab().navigate_path(p, true),
@@ -560,6 +664,10 @@ impl FilesWindow {
             self.action_connect_server();
             return;
         }
+        if matches!(place, Place::SetupSync) {
+            self.action_setup_sync();
+            return;
+        }
         self.add_tab(Some(Self::place_to_file(place)));
         self.sync_chrome();
     }
@@ -567,6 +675,10 @@ impl FilesWindow {
     fn open_place_in_new_window(self: &Rc<Self>, place: &Place) {
         if matches!(place, Place::ConnectNetwork) {
             self.action_connect_server();
+            return;
+        }
+        if matches!(place, Place::SetupSync) {
+            self.action_setup_sync();
             return;
         }
         let Some(app) = self.window.application() else {
@@ -629,6 +741,10 @@ impl FilesWindow {
             });
             gtk_theme::install_open_theme_editor_action(win);
         }
+
+        bind(win, "setup-sync", self, |fw, _, _| {
+            fw.action_setup_sync();
+        });
 
         bind(win, "new-tab", self, |fw, _, _| {
             fw.add_tab(Some(fw.current_tab().location()));
@@ -725,6 +841,8 @@ impl FilesWindow {
         bind(win, "add-favorite", self, |fw, _, _| fw.action_add_favorite());
         bind(win, "add-bookmark", self, |fw, _, _| fw.action_add_bookmark());
         bind(win, "connect-server", self, |fw, _, _| fw.action_connect_server());
+        bind(win, "show-deleted", self, |fw, _, _| fw.action_toggle_show_deleted());
+        bind(win, "restore-version", self, |fw, _, _| fw.action_restore_version());
         bind(win, "paste", self, |fw, _, _| fw.action_paste());
         bind(win, "paste-into", self, |fw, _, _| fw.action_paste_into());
         bind(win, "duplicate", self, |fw, _, _| fw.action_duplicate());
@@ -883,6 +1001,13 @@ impl FilesWindow {
             return;
         }
         clipboard::set_files(&self.clipboard, paths, op, &self.window);
+        self.refresh_clipboard_visuals();
+    }
+
+    fn refresh_clipboard_visuals(&self) {
+        for tab in self.tabs.borrow().iter() {
+            tab.refresh_clipboard_ui();
+        }
     }
 
     fn action_copy_name(&self) {
@@ -1061,6 +1186,54 @@ impl FilesWindow {
         );
     }
 
+    fn action_setup_sync(self: &Rc<Self>) {
+        let folder = self.current_tab().location_path();
+        sync_setup::launch_setup_sync(Some(&self.window), folder.as_deref());
+        self.sidebar.refresh_sync_soon();
+    }
+
+    fn action_toggle_show_deleted(&self) {
+        let tab = self.current_tab();
+        let Some(dir) = tab.location_path() else {
+            return;
+        };
+        if !sync_status::is_under_sync_root(&dir) {
+            show_error(
+                Some(&self.window),
+                "Show deleted",
+                "Open a folder inside the gtk-sync client sync root first.",
+            );
+            return;
+        }
+        tab.set_show_deleted(!tab.show_deleted());
+    }
+
+    fn action_restore_version(self: &Rc<Self>) {
+        let paths = self.target_paths();
+        let Some(path) = paths.first() else {
+            show_error(
+                Some(&self.window),
+                "Restore",
+                "Select a file in the sync folder.",
+            );
+            return;
+        };
+        if sync_status::path_under_sync_root(path).is_none() {
+            show_error(
+                Some(&self.window),
+                "Restore",
+                "This path is not inside the active gtk-sync client folder.",
+            );
+            return;
+        }
+        let fw = Rc::clone(self);
+        sync_status::show_restore_dialog(&self.window, path, move || {
+            fw.current_tab().refresh();
+            fw.current_tab().refresh_sync_ui();
+            fw.sidebar.refresh_sync_soon();
+        });
+    }
+
     /// Paste into the folder currently shown in the tab (Ctrl+V / Paste).
     fn action_paste(&self) {
         let tab = self.current_tab();
@@ -1092,8 +1265,12 @@ impl FilesWindow {
         let refresh_tab = Rc::clone(tab);
         let dest = dir.to_path_buf();
         if !clipboard::is_empty(&clip) {
+            let tabs_snap: Vec<Rc<FolderTab>> = self.tabs.borrow().iter().cloned().collect();
             file_ops::paste_into(Some(&window), &dest, &clip, move || {
                 refresh_tab.refresh();
+                for t in &tabs_snap {
+                    t.refresh_clipboard_ui();
+                }
             });
             return;
         }
@@ -1806,6 +1983,12 @@ fn build_app_menu() -> (gio::Menu, gtk_theme::IconMenu) {
     icons.append_action(&go, "Home", "win.go-home");
     icons.append_action(&go, "Enter Location…", "win.edit-location");
     icons.append_action(&go, "Connect to Server…", "win.connect-server");
+    icons.append(
+        &go,
+        "Setup Sync…",
+        "win.setup-sync",
+        "list-add-symbolic",
+    );
     menu.append_submenu(Some("_Go"), &go);
 
     icons.append_action(&menu, "Keyboard Shortcuts", "app.shortcuts");
@@ -1880,6 +2063,31 @@ fn show_context_menu(
             menu.append_section(None, &link);
         }
 
+        let under_sync = paths
+            .iter()
+            .any(|p| sync_status::path_under_sync_root(p).is_some());
+        if under_sync {
+            let sync = gio::Menu::new();
+            if paths.len() == 1 {
+                let label = if sync_status::path_is_deleted_folder(&paths[0]) {
+                    "Restore Deleted Folder…"
+                } else if sync_status::path_is_sync_deleted(&paths[0]) || !paths[0].exists()
+                {
+                    "Restore Deleted…"
+                } else {
+                    "Restore Previous Version…"
+                };
+                icons.append_action(&sync, label, "win.restore-version");
+            }
+            let show_label = if fw.current_tab().show_deleted() {
+                "Hide Deleted"
+            } else {
+                "Show Deleted"
+            };
+            icons.append_action(&sync, show_label, "win.show-deleted");
+            menu.append_section(None, &sync);
+        }
+
         let danger = gio::Menu::new();
         icons.append_action(&danger, "Move to Trash", "win.trash");
         icons.append_action(&danger, "Delete Permanently...", "win.delete");
@@ -1892,6 +2100,21 @@ fn show_context_menu(
         icons.append_action(&menu, "Select All", "win.select-all");
         icons.append_action(&menu, "Properties", "win.properties");
         icons.append_action(&menu, "Empty Trash...", "win.empty-trash");
+        if fw
+            .current_tab()
+            .location_path()
+            .map(|p| sync_status::is_under_sync_root(&p))
+            .unwrap_or(false)
+        {
+            let sync = gio::Menu::new();
+            let show_label = if fw.current_tab().show_deleted() {
+                "Hide Deleted"
+            } else {
+                "Show Deleted"
+            };
+            icons.append_action(&sync, show_label, "win.show-deleted");
+            menu.append_section(None, &sync);
+        }
     }
 
     // Keep the popover alive; dropping it immediately destroys the menu.

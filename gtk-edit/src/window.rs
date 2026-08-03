@@ -93,6 +93,7 @@ impl EditorWindow {
             .build();
 
         let header = gtk::HeaderBar::new();
+        gtk_theme::prepare_headerbar(&header);
         header.pack_end(&menu_btn);
         header.set_title_widget(Some(&gtk::Label::new(Some("GTK Edit"))));
         window.set_titlebar(Some(&header));
@@ -436,13 +437,51 @@ impl EditorWindow {
         }
     }
 
-    fn wire_notebook(&self, nb: &TabNotebook) {
+    fn wire_notebook(&self, nb: &Rc<TabNotebook>) {
         let this = current_from_window(&self.window);
         let Some(this) = this else { return };
         let this = Rc::clone(&this);
+
+        // "+" is a Button: clicks call this even when that page is already
+        // selected (empty window), which would not emit switch-page.
+        {
+            let this = Rc::clone(&this);
+            let nb_ptr = Rc::clone(nb);
+            nb.set_on_plus(move || {
+                for (i, g) in this.groups.borrow().iter().enumerate() {
+                    if Rc::ptr_eq(g, &nb_ptr) {
+                        *this.active_group.borrow_mut() = i;
+                        break;
+                    }
+                }
+                this.new_tab();
+            });
+        }
+
+        let nb_for_switch = Rc::clone(nb);
         nb.notebook.connect_switch_page(move |_, _, page_num| {
             // Capture page_num — during switch-page current_page() can still be old
             // (same idle pattern gtk-files uses for sync_chrome).
+            // Never linger on the empty "+" page. Creation itself is handled by
+            // the "+" button (avoids double new_tab if both paths fire).
+            if nb_for_switch.is_plus_page(page_num) {
+                let this = Rc::clone(&this);
+                let nb = Rc::clone(&nb_for_switch);
+                glib::idle_add_local_once(move || {
+                    for (i, g) in this.groups.borrow().iter().enumerate() {
+                        if Rc::ptr_eq(g, &nb) {
+                            *this.active_group.borrow_mut() = i;
+                            break;
+                        }
+                    }
+                    if nb.len() == 0 {
+                        this.new_tab();
+                    } else if let Some(last) = nb.len().checked_sub(1) {
+                        nb.notebook.set_current_page(Some(last as u32));
+                    }
+                });
+                return;
+            }
             let this = Rc::clone(&this);
             glib::idle_add_local_once(move || {
                 this.update_statusbar();
@@ -1034,7 +1073,8 @@ fn install_actions(ew: &Rc<EditorWindow>) {
         }
     });
     add_action(win, ew, "find", |ew| {
-        ew.search.show_find();
+        let sel = current_selection_text(ew);
+        ew.search.show_find_with(sel.as_deref());
     });
     add_action(win, ew, "find-next", |ew| {
         if let Some(tab) = ew.current_tab() {
@@ -1049,9 +1089,10 @@ fn install_actions(ew: &Rc<EditorWindow>) {
         }
     });
     add_action(win, ew, "replace", |ew| {
+        let sel = current_selection_text(ew);
         let dlg = ReplaceDialog::new(&ew.window);
         let cfg = ew.config.borrow().clone();
-        dlg.present(&cfg);
+        dlg.present_with(&cfg, sel.as_deref());
         let ew2 = Rc::clone(ew);
         let dlg2 = Rc::clone(&dlg);
         dlg.find_btn.connect_clicked(move |_| {
@@ -1452,6 +1493,25 @@ pub fn open_files(ew: &EditorWindow, files: &[PathBuf]) {
     }
     for f in files {
         ew.open_path(f);
+    }
+}
+
+/// Non-empty selection from the current tab (capped so huge blocks aren't dumped into Find).
+fn current_selection_text(ew: &EditorWindow) -> Option<String> {
+    let tab = ew.current_tab()?;
+    let buf = &tab.document.buffer;
+    let (start, end) = buf.selection_bounds()?;
+    let text = buf.text(&start, &end, false);
+    if text.is_empty() {
+        return None;
+    }
+    // Avoid stuffing multi-megabyte selections into the find entry.
+    const MAX: usize = 2048;
+    let s = text.as_str();
+    if s.len() > MAX {
+        Some(s.chars().take(MAX).collect())
+    } else {
+        Some(s.to_string())
     }
 }
 

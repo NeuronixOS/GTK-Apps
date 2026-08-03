@@ -13,6 +13,7 @@ use gtk::prelude::*;
 
 use crate::config::Config;
 use crate::dnd;
+use crate::sync_status::{self, SyncFileState};
 use crate::thumbnails;
 use crate::util::{
     self, can_write, content_type_description, display_name, format_mtime, format_size,
@@ -61,6 +62,11 @@ pub struct FolderTab {
     on_open: Rc<RefCell<Option<Rc<dyn Fn(gio::File, bool)>>>>,
     on_location: RefCell<Option<Rc<dyn Fn(gio::File)>>>,
     on_context: Rc<RefCell<Option<Rc<dyn Fn(Option<Vec<PathBuf>>, gtk::Widget, f64, f64)>>>>,
+    /// Ghost FileInfo rows for deleted sync paths (when Show deleted is on).
+    ghost_store: gio::ListStore,
+    show_deleted: RefCell<bool>,
+    /// Keeps FlattenListModel's parent list alive.
+    _model_list: gio::ListStore,
 }
 
 impl FolderTab {
@@ -73,8 +79,14 @@ impl FolderTab {
         let filter = gtk::CustomFilter::new(|_| true);
         let filter_model = gtk::FilterListModel::new(Some(directory.clone()), Some(filter.clone()));
 
+        let ghost_store = gio::ListStore::new::<gio::FileInfo>();
+        let model_list = gio::ListStore::with_type(gio::ListModel::static_type());
+        model_list.append(&filter_model);
+        model_list.append(&ghost_store);
+        let flattened = gtk::FlattenListModel::new(Some(model_list.clone()));
+
         let sorter = gtk::CustomSorter::new(|_a, _b| gtk::Ordering::Equal);
-        let flat_model = gtk::SortListModel::new(Some(filter_model), Some(sorter.clone()));
+        let flat_model = gtk::SortListModel::new(Some(flattened), Some(sorter.clone()));
 
         let show_hidden_rc = Rc::new(RefCell::new(config.view.show_hidden));
         let search_query_rc = Rc::new(RefCell::new(String::new()));
@@ -93,6 +105,10 @@ impl FolderTab {
                     return None;
                 };
                 if !is_directory(info) {
+                    return None;
+                }
+                // Deleted ghosts have no on-disk children; open via navigate instead.
+                if sync_status::is_deleted_file_info(info) {
                     return None;
                 }
                 let file = file_from_info(info)?;
@@ -211,6 +227,9 @@ impl FolderTab {
             on_open,
             on_location: RefCell::new(None),
             on_context,
+            ghost_store,
+            show_deleted: RefCell::new(false),
+            _model_list: model_list,
         });
 
         tab.reinstall_filter();
@@ -218,6 +237,7 @@ impl FolderTab {
         // Clicks are wired per-row in the factories; keep activate as Enter-key backup.
         tab.bind_activation();
         tab.bind_selection_changed();
+        tab.refresh_sync_ui();
         tab.update_status();
 
         {
@@ -318,6 +338,7 @@ impl FolderTab {
         }
         *self.location.borrow_mut() = file.clone();
         *self.title.borrow_mut() = title_for_location(&file);
+        thumbnails::bump_generation();
         // Clear then set: TreeListModel can keep showing the previous folder when
         // DirectoryList.set_file is called with only the new location (sidebar
         // Recent / Home clicks updated the terminal via on_location but not the list).
@@ -330,7 +351,75 @@ impl FolderTab {
         if let Some(cb) = self.on_location.borrow().as_ref() {
             cb(file);
         }
+        self.refresh_sync_ui();
         self.update_status();
+    }
+
+    pub fn show_deleted(&self) -> bool {
+        *self.show_deleted.borrow()
+    }
+
+    pub fn set_show_deleted(&self, show: bool) {
+        *self.show_deleted.borrow_mut() = show;
+        self.refresh_sync_ui();
+    }
+
+    /// Refresh ghost deleted rows and force emblem/column rebinds.
+    pub fn refresh_sync_ui(&self) {
+        self.rebuild_sync_ghosts();
+        self.filter.changed(gtk::FilterChange::Different);
+        self.list_view.queue_draw();
+        self.grid_view.queue_draw();
+    }
+
+    /// Rebind / restyle rows after cut/copy so Cut items pick up (or drop) transparency.
+    pub fn refresh_clipboard_ui(&self) {
+        // Filter/sorter "changed" alone does not rebind rows that stay in the
+        // model — walk visible file rows and apply clipboard-cut from file-target.
+        restyle_cut_rows(self.list_view.upcast_ref());
+        restyle_cut_rows(self.grid_view.upcast_ref());
+        self.list_view.queue_draw();
+        self.grid_view.queue_draw();
+    }
+
+    fn rebuild_sync_ghosts(&self) {
+        self.ghost_store.remove_all();
+        if !*self.show_deleted.borrow() {
+            return;
+        }
+        let Some(dir) = self.location_path() else {
+            return;
+        };
+        let Some((root, dir_rel)) = sync_status::path_under_sync_root(&dir) else {
+            return;
+        };
+        // path_under_sync_root on the directory itself yields rel of that dir.
+        let Some(status) = sync_status::load_client_status() else {
+            return;
+        };
+        let existing: std::collections::HashSet<String> = {
+            let mut set = std::collections::HashSet::new();
+            let n = self.directory.n_items();
+            for i in 0..n {
+                if let Some(info) = self.directory.item(i).and_downcast::<gio::FileInfo>() {
+                    set.insert(display_name(&info));
+                }
+            }
+            set
+        };
+        for tomb in sync_status::tombstones_in_dir(&status, &dir_rel) {
+            let name = Path::new(&tomb.path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| tomb.path.clone());
+            if existing.contains(&name) {
+                continue;
+            }
+            let is_dir = sync_status::tombstone_looks_like_dir(&status, &tomb.path);
+            let info =
+                sync_status::make_deleted_file_info(&root, &tomb.path, tomb.ts, is_dir);
+            self.ghost_store.append(&info);
+        }
     }
 
     pub fn navigate_path(&self, path: &Path, push_history: bool) {
@@ -462,13 +551,6 @@ impl FolderTab {
         }
     }
 
-    pub fn selected_files(&self) -> Vec<gio::File> {
-        self.selected_paths()
-            .into_iter()
-            .map(|p| gio::File::for_path(p))
-            .collect()
-    }
-
     pub fn select_all(&self) {
         match *self.view_mode.borrow() {
             ViewMode::List => {
@@ -569,9 +651,11 @@ impl FolderTab {
     }
 
     pub fn refresh(&self) {
+        thumbnails::bump_generation();
         let file = self.location();
         self.directory.set_file(None::<&gio::File>);
         self.directory.set_file(Some(&file));
+        self.refresh_sync_ui();
         self.update_status();
     }
 
@@ -765,9 +849,15 @@ fn compare_infos(
                 let tb = ib.modification_date_time().map(|d| d.to_unix()).unwrap_or(0);
                 ta.cmp(&tb)
             }
-            _ => display_name(ia)
-                .to_lowercase()
-                .cmp(&display_name(ib).to_lowercase()),
+            _ => {
+                let na = display_name(ia);
+                let nb = display_name(ib);
+                // Avoid allocating lowercased Strings on every compare (N log N).
+                na.as_bytes()
+                    .iter()
+                    .map(u8::to_ascii_lowercase)
+                    .cmp(nb.as_bytes().iter().map(u8::to_ascii_lowercase))
+            }
         };
     }
     if reversed {
@@ -806,6 +896,84 @@ fn make_symlink_emblem(pixel_size: i32) -> gtk::Image {
 fn make_lock_emblem(pixel_size: i32) -> gtk::Image {
     // Bottom-left — no-write / read-only lock (keeps clear of the symlink badge).
     make_badge_emblem(pixel_size, "lock-emblem", gtk::Align::Start, gtk::Align::End)
+}
+
+fn make_sync_emblem(pixel_size: i32) -> gtk::Image {
+    // Top-right — gtk-sync state (up to date / syncing / deleted).
+    make_badge_emblem(pixel_size, "sync-emblem", gtk::Align::End, gtk::Align::Start)
+}
+
+fn sync_state_for_info(info: &gio::FileInfo) -> Option<SyncFileState> {
+    if sync_status::is_deleted_file_info(info) {
+        return Some(SyncFileState::Deleted);
+    }
+    let file = file_from_info(info)?;
+    let path = file.path()?;
+    let (_root, rel) = sync_status::path_under_sync_root(&path)?;
+    let status = sync_status::load_client_status()?;
+    // On-disk listing row (not a Show-deleted ghost): never keep a Deleted
+    // emblem from a leftover parent tombstone after a partial restore.
+    status.state_for_entry(&rel, is_directory(info) || rel.is_empty(), true)
+}
+
+fn apply_sync_emblem(emblem: &gtk::Image, info: &gio::FileInfo) {
+    if let Some(state) = sync_state_for_info(info) {
+        emblem.set_icon_name(Some(state.icon_name()));
+        emblem.set_visible(true);
+        emblem.set_tooltip_text(Some(state.label()));
+    } else {
+        emblem.set_visible(false);
+        emblem.set_tooltip_text(None);
+    }
+}
+
+fn apply_sync_row_style(row: &impl IsA<gtk::Widget>, info: &gio::FileInfo) {
+    if sync_status::is_deleted_file_info(info)
+        || matches!(sync_state_for_info(info), Some(SyncFileState::Deleted))
+    {
+        row.add_css_class("sync-deleted");
+    } else {
+        row.remove_css_class("sync-deleted");
+    }
+}
+
+fn apply_cut_row_style(row: &impl IsA<gtk::Widget>, info: &gio::FileInfo) {
+    let cut = resolve_file(info, None)
+        .and_then(|f| f.path())
+        .map(|p| crate::clipboard::is_path_cut(&p))
+        .unwrap_or(false);
+    if cut {
+        row.add_css_class("clipboard-cut");
+    } else {
+        row.remove_css_class("clipboard-cut");
+    }
+}
+
+/// Apply / clear `clipboard-cut` on every `.file-row-content` under `root`.
+fn restyle_cut_rows(root: &gtk::Widget) {
+    if root.has_css_class("file-row-content") {
+        let cut = unsafe {
+            root.data::<Rc<RefCell<Option<(gio::File, bool, PathBuf)>>>>("file-target")
+                .and_then(|ptr| {
+                    ptr.as_ref()
+                        .borrow()
+                        .as_ref()
+                        .map(|(_, _, path)| crate::clipboard::is_path_cut(path))
+                })
+                .unwrap_or(false)
+        };
+        if cut {
+            root.add_css_class("clipboard-cut");
+        } else {
+            root.remove_css_class("clipboard-cut");
+        }
+    }
+    let mut child = root.first_child();
+    while let Some(c) = child {
+        let next = c.next_sibling();
+        restyle_cut_rows(&c);
+        child = next;
+    }
 }
 
 fn overlay_badge(overlay: &gtk::Overlay, css_class: &str) -> Option<gtk::Image> {
@@ -900,6 +1068,20 @@ fn activate_tree_at(
     let Some(info) = info_from_selection_item(&item) else {
         return;
     };
+    // Deleted files: restore via context menu. Deleted folders: navigate so
+    // Show deleted can list child tombstones under that relative path.
+    if sync_status::is_deleted_file_info(&info) {
+        if !is_directory(&info) {
+            return;
+        }
+        let Some(file) = resolve_file(&info, None) else {
+            return;
+        };
+        if let Some(cb) = on_open.borrow().as_ref() {
+            cb(file, true);
+        }
+        return;
+    }
     let Some(file) = resolve_file(&info, None) else {
         eprintln!("gtk-files: could not resolve file for “{}”", display_name(&info));
         return;
@@ -916,6 +1098,18 @@ fn activate_flat_at(
     pos: u32,
 ) {
     if let Some(info) = selection.item(pos).and_downcast::<gio::FileInfo>() {
+        if sync_status::is_deleted_file_info(&info) {
+            if !is_directory(&info) {
+                return;
+            }
+            let Some(file) = resolve_file(&info, Some(&location.borrow())) else {
+                return;
+            };
+            if let Some(cb) = on_open.borrow().as_ref() {
+                cb(file, true);
+            }
+            return;
+        }
         let file = resolve_file(&info, Some(&location.borrow()));
         let Some(file) = file else {
             return;
@@ -1036,12 +1230,8 @@ fn apply_pointer_selection(
 fn update_status_label(label: &gtk::Label, selection: &impl IsA<gtk::SelectionModel>) {
     let selection = selection.as_ref();
     let total = selection.n_items();
-    let mut selected = 0u32;
-    for i in 0..total {
-        if selection.is_selected(i) {
-            selected += 1;
-        }
-    }
+    // Bitset size — O(selected), not O(total). Scanning every row freezes huge folders.
+    let selected = selection.selection().size() as u32;
     if selected == 0 {
         label.set_text(&format!(
             "{} item{}",
@@ -1095,10 +1285,12 @@ fn build_tree_column_view(
             icon.set_can_target(false);
             let lock = make_lock_emblem(16);
             let symlink = make_symlink_emblem(16);
+            let sync_em = make_sync_emblem(16);
             let icon_overlay = gtk::Overlay::new();
             icon_overlay.set_child(Some(&icon));
             icon_overlay.add_overlay(&lock);
             icon_overlay.add_overlay(&symlink);
+            icon_overlay.add_overlay(&sync_em);
             icon_overlay.set_can_target(false);
             let label = gtk::Label::new(None);
             label.set_xalign(0.0);
@@ -1231,7 +1423,10 @@ fn build_tree_column_view(
                 return;
             };
             expander.set_list_row(Some(&tree_row));
-            expander.set_hide_expander(!is_directory(&info));
+            // No in-tree children for deleted ghosts — open the folder instead.
+            expander.set_hide_expander(
+                !is_directory(&info) || sync_status::is_deleted_file_info(&info),
+            );
 
             let Some(row) = expander.child().and_downcast::<gtk::Box>() else {
                 return;
@@ -1248,6 +1443,9 @@ fn build_tree_column_view(
             let Some(lock) = overlay_badge(&icon_overlay, "lock-emblem") else {
                 return;
             };
+            let Some(sync_em) = overlay_badge(&icon_overlay, "sync-emblem") else {
+                return;
+            };
             let Some(label) = icon_overlay
                 .next_sibling()
                 .and_downcast::<gtk::Label>()
@@ -1258,12 +1456,25 @@ fn build_tree_column_view(
             apply_item_tooltip(&row, &info);
             apply_symlink_emblem(&symlink, &info);
             apply_lock_emblem(&lock, &info);
+            apply_sync_emblem(&sync_em, &info);
+            apply_sync_row_style(&row, &info);
+            apply_cut_row_style(&row, &info);
+            if let Some(state) = sync_state_for_info(&info) {
+                let tip = format!("{}\n{}", display_name(&info), state.label());
+                row.set_tooltip_text(Some(&tip));
+            }
 
             if let Some(file) = resolve_file(&info, None) {
                 let path = file.path().unwrap_or_default();
                 let is_dir = is_directory(&info);
-                // List view: compact thumbs
-                thumbnails::apply_thumbnail(&icon, &file, &info, 32);
+                // List view: MIME icons (+ cached thumbs only). Generating from
+                // multi‑megapixel JPEGs here freezes large photo folders.
+                if sync_status::is_deleted_file_info(&info) {
+                    icon.set_from_gicon(&icon_for_info(&info, false));
+                    icon.set_pixel_size(32);
+                } else {
+                    thumbnails::apply_thumbnail(&icon, &file, &info, 32, false);
+                }
                 unsafe {
                     if let Some(ptr) =
                         row.data::<Rc<RefCell<Option<(gio::File, bool, PathBuf)>>>>("file-target")
@@ -1372,6 +1583,34 @@ fn append_info_columns(view: &gtk::ColumnView) {
         col.set_fixed_width(140);
         view.append_column(&col);
     }
+
+    // Sync status (gtk-sync client root only; empty otherwise)
+    {
+        let factory = gtk::SignalListItemFactory::new();
+        factory.connect_setup(move |_, item| {
+            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+            let label = gtk::Label::new(None);
+            label.set_xalign(0.0);
+            label.add_css_class("dim-label");
+            label.add_css_class("caption");
+            item.set_child(Some(&label));
+        });
+        factory.connect_bind(move |_, item| {
+            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+            let Some(info) = item.item().and_then(|o| info_from_selection_item(&o)) else {
+                return;
+            };
+            let label = item.child().and_downcast::<gtk::Label>().unwrap();
+            if let Some(state) = sync_state_for_info(&info) {
+                label.set_text(state.label());
+            } else {
+                label.set_text("");
+            }
+        });
+        let col = gtk::ColumnViewColumn::new(Some("Sync"), Some(factory));
+        col.set_fixed_width(100);
+        view.append_column(&col);
+    }
 }
 
 fn build_grid_view(
@@ -1405,10 +1644,12 @@ fn build_grid_view(
         icon.set_can_target(false);
         let lock = make_lock_emblem((size / 3).clamp(16, 48));
         let symlink = make_symlink_emblem((size / 3).clamp(16, 48));
+        let sync_em = make_sync_emblem((size / 3).clamp(16, 48));
         let icon_overlay = gtk::Overlay::new();
         icon_overlay.set_child(Some(&icon));
         icon_overlay.add_overlay(&lock);
         icon_overlay.add_overlay(&symlink);
+        icon_overlay.add_overlay(&sync_em);
         icon_overlay.set_halign(gtk::Align::Center);
         icon_overlay.set_can_target(false);
         let label = gtk::Label::new(None);
@@ -1554,6 +1795,9 @@ fn build_grid_view(
         let Some(lock) = overlay_badge(&icon_overlay, "lock-emblem") else {
             return;
         };
+        let Some(sync_em) = overlay_badge(&icon_overlay, "sync-emblem") else {
+            return;
+        };
         let Some(label) = icon_overlay
             .next_sibling()
             .and_downcast::<gtk::Label>()
@@ -1567,12 +1811,23 @@ fn build_grid_view(
         let badge = (size / 3).clamp(16, 48);
         symlink.set_pixel_size(badge);
         lock.set_pixel_size(badge);
+        sync_em.set_pixel_size(badge);
         apply_symlink_emblem(&symlink, &info);
         apply_lock_emblem(&lock, &info);
+        apply_sync_emblem(&sync_em, &info);
+        apply_sync_row_style(&box_, &info);
+        apply_cut_row_style(&box_, &info);
         if let Some(file) = resolve_file(&info, None) {
             let path = file.path().unwrap_or_default();
             let is_dir = is_directory(&info);
-            thumbnails::apply_thumbnail(&icon, &file, &info, size);
+            // Deleted ghosts: folder/file icon + trash sync emblem.
+            // Grid: allow thumbnail generation via the bounded worker pool.
+            if sync_status::is_deleted_file_info(&info) {
+                icon.set_from_gicon(&icon_for_info(&info, false));
+                icon.set_pixel_size(size);
+            } else {
+                thumbnails::apply_thumbnail(&icon, &file, &info, size, true);
+            }
             unsafe {
                 if let Some(ptr) =
                     box_.data::<Rc<RefCell<Option<(gio::File, bool, PathBuf)>>>>("file-target")

@@ -814,6 +814,27 @@ notebook > header > tabs > tab:checked {{
   background-image: none;
   color: {fg};
 }}
+/* gtk-edit: document tabs expand equally; trailing "+" stays compact. */
+notebook.gtk-edit-tabs > header > tabs > tab {{
+  min-width: 0;
+}}
+notebook.gtk-edit-tabs > header > tabs > tab:has(.gtk-edit-new-tab) {{
+  padding: 0;
+  min-width: 2.25em;
+  max-width: 2.25em;
+}}
+.gtk-edit-new-tab {{
+  min-width: 2.25em;
+  max-width: 2.25em;
+}}
+button.gtk-edit-new-tab-label {{
+  min-width: 2.25em;
+  max-width: 2.25em;
+  padding: 4px 0;
+  border-radius: 0;
+  font-weight: bold;
+  font-size: 1.15em;
+}}
 notebook > stack {{
   background-color: {bg};
   background-image: none;
@@ -1347,12 +1368,25 @@ fn apply_chrome_css(is_dark: bool, css: &str) {
     // Align GTK's light/dark preference with the suite profile so Adwaita does
     // not keep loading Default-dark assets under a light profile. Apps still
     // rely on chrome CSS overrides when the desktop theme is forced to *-dark.
+    let hide_csd_controls = hyprbars_active();
     if let Some(settings) = gtk::Settings::default() {
         settings.set_gtk_application_prefer_dark_theme(is_dark);
+        // Hyprbars draws − □ ×; hide GTK CSD window controls to avoid doubles.
+        if hide_csd_controls {
+            settings.set_gtk_decoration_layout(Some(":"));
+        }
     }
 
     // Adwaita symbolics for menus/toolbars even when the session uses Faenza/etc.
     ensure_adwaita_icons();
+
+    let css_owned;
+    let css = if hide_csd_controls {
+        css_owned = format!("{css}\n{HIDE_CSD_WINDOWCONTROLS_CSS}");
+        css_owned.as_str()
+    } else {
+        css
+    };
 
     if let Some(display) = gdk::Display::default() {
         CHROME_PROVIDER.with(|slot| {
@@ -1372,6 +1406,32 @@ fn apply_chrome_css(is_dark: bool, css: &str) {
         });
     }
 }
+
+/// Collapse / hide GTK client-side window controls (close etc.) when hyprbars
+/// already provides them.
+const HIDE_CSD_WINDOWCONTROLS_CSS: &str = r#"
+headerbar windowcontrols,
+.titlebar windowcontrols,
+windowcontrols {
+  opacity: 0;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+}
+headerbar windowcontrols button,
+.titlebar windowcontrols button,
+windowcontrols button {
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+  opacity: 0;
+  border: none;
+  background: none;
+  background-image: none;
+  box-shadow: none;
+}
+"#;
 
 /// Preferred GtkSourceView scheme ids for a profile (first available wins).
 pub fn sourceview_scheme_candidates(profile_id: &str) -> &'static [&'static str] {
@@ -1586,10 +1646,214 @@ pub fn profile_id_at(ids: &[&'static str], selected: u32) -> Option<&'static str
     ids.get(selected as usize).copied()
 }
 
+/// Best-effort: rewrite hyprbars colors in `~/.config/hypr/hyprland.conf` to
+/// match this profile (bar = elevated surface, text/glyphs = foreground), then
+/// push live via `hyprctl keyword` + `hyprctl reload`. No-op outside Hyprland.
+pub fn sync_hyprbars(profile: &Profile) {
+    let _ = sync_hyprbars_colors(&profile.surface_hex(), profile.foreground);
+}
+
+/// Same as [`sync_hyprbars`] for arbitrary hex colors (`#rrggbb`).
+pub fn sync_hyprbars_colors(bar_hex: &str, text_hex: &str) -> bool {
+    let Some(bar_rgb) = hex_to_hypr_rgb(bar_hex) else {
+        return false;
+    };
+    let Some(text_rgb) = hex_to_hypr_rgb(text_hex) else {
+        return false;
+    };
+    let bar_rgba = format!("rgba({}ff)", &bar_rgb[4..10]); // rgb(RRGGBB) → rgba(RRGGBBff)
+
+    // 1) Persist so the next login / reload keeps the colors.
+    if let Some(path) = hyprland_conf_path() {
+        if let Ok(original) = std::fs::read_to_string(&path) {
+            let mut out = original.clone();
+            out = replace_hypr_assign(&out, "bar_color", &bar_rgba);
+            out = replace_hypr_assign(&out, "col.text", &text_rgb);
+            out = replace_hypr_assign(&out, "inactive_button_color", &bar_rgb);
+            out = rewrite_hyprbars_buttons(&out, &bar_rgb, &text_rgb);
+            if out != original {
+                let _ = std::fs::write(&path, out);
+            }
+        }
+    }
+
+    // 2) Live update (no full compositor restart): keywords take effect immediately
+    //    for bar fill / title / inactive button fill.
+    hyprctl_keyword("plugin:hyprbars:bar_color", &bar_rgba);
+    hyprctl_keyword("plugin:hyprbars:col.text", &text_rgb);
+    hyprctl_keyword("plugin:hyprbars:inactive_button_color", &bar_rgb);
+
+    // 3) Buttons are registered via the hyprbars-button keyword list; a config
+    //    reload rebuilds them from the file we just wrote.
+    hyprctl_reload();
+    true
+}
+
+fn hyprland_conf_path() -> Option<PathBuf> {
+    let candidates = [
+        dirs::config_dir().map(|d| d.join("hypr/hyprland.conf")),
+        dirs::home_dir().map(|d| d.join("configs/hypr/hyprland.conf")),
+    ];
+    for c in candidates.into_iter().flatten() {
+        if c.is_file() {
+            return Some(c);
+        }
+    }
+    None
+}
+
+fn hex_to_hypr_rgb(hex: &str) -> Option<String> {
+    let (r, g, b) = parse_rgb(hex)?;
+    Some(format!("rgb({r:02x}{g:02x}{b:02x})"))
+}
+
+fn replace_hypr_assign(text: &str, key: &str, value: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 32);
+    let prefix = format!("{key} =");
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(&prefix) || trimmed.starts_with(&format!("{key}=")) {
+            let indent_len = line.len() - trimmed.len();
+            let indent = &line[..indent_len];
+            out.push_str(indent);
+            out.push_str(key);
+            out.push_str(" = ");
+            out.push_str(value);
+            out.push('\n');
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !text.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+fn rewrite_hyprbars_buttons(text: &str, bar_rgb: &str, text_rgb: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 32);
+    for line in text.lines() {
+        if line.trim_start().starts_with("hyprbars-button") {
+            out.push_str(&rewrite_one_hyprbars_button(line, bar_rgb, text_rgb));
+            out.push('\n');
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !text.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+fn rewrite_one_hyprbars_button(line: &str, bar_rgb: &str, text_rgb: &str) -> String {
+    let indent_len = line.len() - line.trim_start().len();
+    let indent = &line[..indent_len];
+    let trimmed = line.trim_start();
+    let Some(eq) = trimmed.find('=') else {
+        return line.to_string();
+    };
+    let rest = trimmed[eq + 1..].trim();
+    let commas: Vec<usize> = rest
+        .char_indices()
+        .filter_map(|(i, c)| if c == ',' { Some(i) } else { None })
+        .collect();
+    if commas.len() < 3 {
+        return line.to_string();
+    }
+    let size = rest[commas[0] + 1..commas[1]].trim();
+    let icon = rest[commas[1] + 1..commas[2]].trim();
+    let after_icon = rest[commas[2] + 1..].trim();
+    let action = {
+        let lower = after_icon.to_ascii_lowercase();
+        if let Some(idx) = lower
+            .rfind(", rgb(")
+            .or_else(|| lower.rfind(",rgba("))
+            .or_else(|| lower.rfind(",rgb("))
+        {
+            after_icon[..idx].trim()
+        } else {
+            after_icon
+        }
+    };
+    format!("{indent}hyprbars-button = {bar_rgb}, {size}, {icon}, {action}, {text_rgb}")
+}
+
+fn hypr_instance_signature() -> Option<String> {
+    if let Ok(sig) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
+        if !sig.is_empty() {
+            return Some(sig);
+        }
+    }
+    let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?);
+    let dir = runtime.join("hypr");
+    let mut entries: Vec<_> = std::fs::read_dir(dir).ok()?.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    entries
+        .into_iter()
+        .rev()
+        .find(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+}
+
+fn hyprctl_cmd() -> std::process::Command {
+    let mut cmd = std::process::Command::new("hyprctl");
+    if let Some(sig) = hypr_instance_signature() {
+        cmd.env("HYPRLAND_INSTANCE_SIGNATURE", sig);
+    }
+    cmd
+}
+
+fn hyprctl_quiet(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+}
+
+fn hyprctl_keyword(key: &str, value: &str) {
+    let _ = hyprctl_quiet(hyprctl_cmd().args(["keyword", key, value])).status();
+}
+
+fn hyprctl_reload() {
+    let _ = hyprctl_quiet(hyprctl_cmd().arg("reload")).status();
+}
+
+/// True when the Hyprland hyprbars plugin is loaded (titlebar − □ ×).
+pub fn hyprbars_active() -> bool {
+    if hypr_instance_signature().is_none() {
+        return false;
+    }
+    let Ok(out) = hyprctl_cmd()
+        .args(["plugin", "list"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .to_ascii_lowercase()
+        .contains("plugin hyprbars")
+}
+
+/// Prefer hiding GTK headerbar close/min/max when hyprbars owns those controls.
+pub fn headerbar_show_title_buttons() -> bool {
+    !hyprbars_active()
+}
+
+/// Apply suite defaults to a headerbar (hide CSD buttons under hyprbars).
+pub fn prepare_headerbar(header: &gtk::HeaderBar) {
+    header.set_show_title_buttons(headerbar_show_title_buttons());
+}
+
 /// Persist theme id, apply chrome CSS, then invoke `on_profile`.
 ///
 /// Also notifies [`watch_theme`] listeners so other suite apps (and VTE panels
-/// in this process) stay in sync.
+/// in this process) stay in sync, and best-effort updates Hyprland hyprbars
+/// colors to match the profile ([`sync_hyprbars`]).
 pub fn select_theme(id: &str, on_profile: impl FnOnce(&Profile)) {
     let Some(profile) = profile_by_id(id) else {
         return;
@@ -1598,6 +1862,7 @@ pub fn select_theme(id: &str, on_profile: impl FnOnce(&Profile)) {
     apply_chrome(profile);
     on_profile(profile);
     broadcast_theme(profile, false);
+    sync_hyprbars(profile);
 }
 
 /// Watch the shared theme file and keep a stateful window action in sync.

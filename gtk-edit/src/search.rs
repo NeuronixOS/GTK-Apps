@@ -104,12 +104,17 @@ impl SearchBar {
         this
     }
 
-    pub fn show_find(&self) {
+    /// Reveal the find bar. When `initial` is set (e.g. current selection),
+    /// that text is placed in the search entry.
+    pub fn show_find_with(&self, initial: Option<&str>) {
         *self.mode.borrow_mut() = SearchMode::Find;
         self.entry.set_placeholder_text(Some("Search…"));
         self.entry.set_primary_icon_name(Some("edit-find-symbolic"));
         self.nav_box.set_visible(true);
         self.opts_btn.set_visible(true);
+        if let Some(text) = initial.filter(|t| !t.is_empty()) {
+            self.entry.set_text(text);
+        }
         self.revealer.set_reveal_child(true);
         self.entry.grab_focus();
         self.entry.select_region(0, -1);
@@ -163,8 +168,10 @@ impl SearchBar {
         let context = sourceview5::SearchContext::new(buffer, Some(&settings));
         context.set_highlight(highlight);
 
-        let insert = buffer.get_insert();
-        let iter = buffer.iter_at_mark(&insert);
+        // Start after (forward) / before (backward) the current selection so
+        // repeated Find advances instead of re-hitting the same match when the
+        // insert mark sits at the selection start (right-to-left select).
+        let iter = search_iter(buffer, forward);
         let found = if forward {
             context.forward(&iter)
         } else {
@@ -246,4 +253,17 @@ pub fn clear_search_highlights(buffer: &sourceview5::Buffer) {
     let settings = sourceview5::SearchSettings::new();
     let context = sourceview5::SearchContext::new(buffer, Some(&settings));
     context.set_highlight(false);
+}
+
+/// Iter to begin a search from so Find Next/Prev skips the current hit.
+pub fn search_iter(buffer: &sourceview5::Buffer, forward: bool) -> gtk::TextIter {
+    if let Some((start, end)) = buffer.selection_bounds() {
+        if forward {
+            end
+        } else {
+            start
+        }
+    } else {
+        buffer.iter_at_mark(&buffer.get_insert())
+    }
 }

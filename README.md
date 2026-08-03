@@ -19,6 +19,7 @@ Suite of GTK4 desktop apps for Neuronix. Apps share color profiles and UI chrome
 | `gtk-meetings` | Python | Paste JSON events and import them into Google Calendar (OAuth) |
 | `gtk-workspaces` | Python | Named workspace launcher (run command sets) |
 | `gtk-worktimezone` | Python | Coworker timezone tracker (edit/view local times across zones) |
+| `gtk-sync` | Rust | LAN file sync (client + server): HTTPS/TLS mesh, CouchDB metadata, systemd `gtk-sync` / `gtk-sync-client` |
 
 Shared library (not launched as an app):
 

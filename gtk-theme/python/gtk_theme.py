@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -606,6 +608,172 @@ def select_theme(
     if on_profile:
         on_profile(profile)
     _broadcast(profile, from_file=False)
+    sync_hyprbars(profile)
+
+
+def sync_hyprbars(profile: Optional[Profile] = None) -> bool:
+    """Rewrite hyprbars colors to match the GTK theme profile (best-effort).
+
+    Bar / button fill use the elevated surface color (same idea as GTK
+    headerbars). Title and glyphs use the profile foreground.
+    """
+    profile = profile or load_profile()
+    return sync_hyprbars_colors(profile.surface_hex(), profile.foreground)
+
+
+def sync_hyprbars_colors(bar_hex: str, text_hex: str) -> bool:
+    bar_rgb = _hex_to_hypr_rgb(bar_hex)
+    text_rgb = _hex_to_hypr_rgb(text_hex)
+    if not bar_rgb or not text_rgb:
+        return False
+    # rgb(RRGGBB) → rgba(RRGGBBff)
+    bar_rgba = f"rgba({bar_rgb[4:10]}ff)"
+
+    # 1) Persist so the next login / reload keeps the colors.
+    path = _hyprland_conf_path()
+    if path is not None and path.is_file():
+        try:
+            original = path.read_text(encoding="utf-8")
+        except OSError:
+            original = None
+        if original is not None:
+            out = original
+            out = _replace_hypr_assign(out, "bar_color", bar_rgba)
+            out = _replace_hypr_assign(out, "col.text", text_rgb)
+            out = _replace_hypr_assign(out, "inactive_button_color", bar_rgb)
+            out = _rewrite_hyprbars_buttons(out, bar_rgb, text_rgb)
+            if out != original:
+                try:
+                    path.write_text(out, encoding="utf-8")
+                except OSError:
+                    pass
+
+    # 2) Live update: keywords take effect immediately for bar/title/inactive fill.
+    _hyprctl_keyword("plugin:hyprbars:bar_color", bar_rgba)
+    _hyprctl_keyword("plugin:hyprbars:col.text", text_rgb)
+    _hyprctl_keyword("plugin:hyprbars:inactive_button_color", bar_rgb)
+
+    # 3) Rebuild − □ × buttons from the rewritten hyprbars-button lines.
+    _hyprctl_reload()
+    return True
+
+
+def _hyprland_conf_path() -> Optional[Path]:
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    for cand in (xdg / "hypr" / "hyprland.conf", Path.home() / "configs" / "hypr" / "hyprland.conf"):
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _hex_to_hypr_rgb(hex_color: str) -> Optional[str]:
+    try:
+        r, g, b = _parse_hex(hex_color)
+    except Exception:
+        return None
+    return f"rgb({r:02x}{g:02x}{b:02x})"
+
+
+def _replace_hypr_assign(text: str, key: str, value: str) -> str:
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    key_eq = f"{key} ="
+    key_eq2 = f"{key}="
+    for line in lines:
+        bare = line.rstrip("\r\n")
+        nl = line[len(bare) :]
+        trimmed = bare.lstrip()
+        indent = bare[: len(bare) - len(trimmed)]
+        if trimmed.startswith(key_eq) or trimmed.startswith(key_eq2):
+            out.append(f"{indent}{key} = {value}{nl or chr(10)}")
+        else:
+            out.append(line)
+    return "".join(out)
+
+
+def _rewrite_hyprbars_buttons(text: str, bar_rgb: str, text_rgb: str) -> str:
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    for line in lines:
+        bare = line.rstrip("\r\n")
+        nl = line[len(bare) :]
+        if bare.lstrip().startswith("hyprbars-button"):
+            out.append(_rewrite_one_hyprbars_button(bare, bar_rgb, text_rgb) + (nl or "\n"))
+        else:
+            out.append(line)
+    return "".join(out)
+
+
+def _rewrite_one_hyprbars_button(line: str, bar_rgb: str, text_rgb: str) -> str:
+    indent = line[: len(line) - len(line.lstrip())]
+    trimmed = line.lstrip()
+    if "=" not in trimmed:
+        return line
+    rest = trimmed.split("=", 1)[1].strip()
+    commas = [i for i, c in enumerate(rest) if c == ","]
+    if len(commas) < 3:
+        return line
+    size = rest[commas[0] + 1 : commas[1]].strip()
+    icon = rest[commas[1] + 1 : commas[2]].strip()
+    after_icon = rest[commas[2] + 1 :].strip()
+    lower = after_icon.lower()
+    idx = max(lower.rfind(", rgb("), lower.rfind(",rgba("), lower.rfind(",rgb("))
+    action = after_icon[:idx].strip() if idx >= 0 else after_icon
+    return f"{indent}hyprbars-button = {bar_rgb}, {size}, {icon}, {action}, {text_rgb}"
+
+
+def _hypr_env() -> dict[str, str]:
+    env = os.environ.copy()
+    if env.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        return env
+    runtime = env.get("XDG_RUNTIME_DIR")
+    if not runtime:
+        return env
+    hypr = Path(runtime) / "hypr"
+    try:
+        dirs = sorted(
+            (p for p in hypr.iterdir() if p.is_dir()),
+            key=lambda p: p.name,
+        )
+    except OSError:
+        return env
+    if dirs:
+        env["HYPRLAND_INSTANCE_SIGNATURE"] = dirs[-1].name
+    return env
+
+
+def _hyprctl_keyword(key: str, value: str) -> None:
+    if not shutil.which("hyprctl"):
+        return
+    try:
+        subprocess.run(
+            ["hyprctl", "keyword", key, value],
+            env=_hypr_env(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+
+def _hyprctl_reload() -> None:
+    if not shutil.which("hyprctl"):
+        return
+    try:
+        subprocess.run(
+            ["hyprctl", "reload"],
+            env=_hypr_env(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -621,9 +789,13 @@ def apply_chrome(profile: Optional[Profile] = None) -> None:
     from gi.repository import Gdk, Gtk
 
     profile = profile or load_profile()
+    hide_csd = hyprbars_active()
     settings = Gtk.Settings.get_default()
     if settings is not None:
         settings.set_property("gtk-application-prefer-dark-theme", profile.is_dark())
+        if hide_csd:
+            # Hyprbars draws − □ ×; hide GTK CSD window controls to avoid doubles.
+            settings.set_property("gtk-decoration-layout", ":")
     try:
         apply_adw_color_scheme(profile)
     except Exception:
@@ -640,7 +812,67 @@ def apply_chrome(profile: Optional[Profile] = None) -> None:
         Gtk.StyleContext.add_provider_for_display(
             display, _chrome_provider, priority
         )
-    _chrome_provider.load_from_data(chrome_css(profile).encode("utf-8"))
+    css = chrome_css(profile)
+    if hide_csd:
+        css = css + "\n" + _HIDE_CSD_WINDOWCONTROLS_CSS
+    _chrome_provider.load_from_data(css.encode("utf-8"))
+
+
+_HIDE_CSD_WINDOWCONTROLS_CSS = """
+headerbar windowcontrols,
+.titlebar windowcontrols,
+windowcontrols {
+  opacity: 0;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+}
+headerbar windowcontrols button,
+.titlebar windowcontrols button,
+windowcontrols button {
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+  opacity: 0;
+  border: none;
+  background: none;
+  background-image: none;
+  box-shadow: none;
+}
+"""
+
+
+def hyprbars_active() -> bool:
+    """True when the Hyprland hyprbars plugin is loaded."""
+    if not shutil.which("hyprctl"):
+        return False
+    try:
+        out = subprocess.run(
+            ["hyprctl", "plugin", "list"],
+            env=_hypr_env(),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except Exception:
+        return False
+    return "plugin hyprbars" in (out.stdout or "").lower()
+
+
+def headerbar_show_title_buttons() -> bool:
+    """Prefer hiding GTK headerbar close/min/max when hyprbars owns them."""
+    return not hyprbars_active()
+
+
+def prepare_headerbar(headerbar) -> None:
+    """Apply suite defaults (hide CSD buttons under hyprbars)."""
+    try:
+        headerbar.set_show_title_buttons(headerbar_show_title_buttons())
+    except Exception:
+        pass
 
 
 def append_profile_menu(parent, action_name: str = "win.theme") -> None:
@@ -936,7 +1168,6 @@ def attach_profile_menu(
         headerbar = _as_headerbar(window.get_titlebar())
     if headerbar is None and create_headerbar:
         headerbar = Gtk.HeaderBar()
-        headerbar.set_show_title_buttons(True)
         # Prefer set_titlebar when available; Adw.ApplicationWindow uses content.
         if hasattr(window, "set_titlebar"):
             try:
@@ -945,6 +1176,7 @@ def attach_profile_menu(
                 headerbar = None
     if headerbar is None:
         raise ValueError("No HeaderBar available; pass headerbar=...")
+    prepare_headerbar(headerbar)
 
     action = install_profile_action(window, "theme")
     install_open_theme_editor_action(window)

@@ -99,6 +99,11 @@ Thumbnail sizes in grid view: `small` (48px), `medium` (64px), `large` (96px), `
 | `Alt+Home` | Home |
 | `Ctrl+L` | Enter location |
 | `Ctrl+Alt+S` | Connect to Server |
+| Sidebar → Sync → Setup Sync | Launch gtk-sync installer (server or client) |
+| Sidebar → Sync (status / folder) | Active server status; click client folder to open it |
+| Sync ✕ / eject | Uninstall local server; disconnect client (files kept) |
+| Sync folder emblems / Sync column | Up to date, Syncing, Pending, Deleted (from client status.json) |
+| Context → Show Deleted | Ghost tombstone rows (dimmed); Restore Previous Version… |
 | `Ctrl+R` / `F5` | Reload |
 | `Ctrl+T` / `Ctrl+W` | New / close tab |
 | `Ctrl+N` | New window |
@@ -120,6 +125,7 @@ Thumbnail sizes in grid view: `small` (48px), `medium` (64px), `large` (96px), `
 | Module | Role |
 |--------|------|
 | `window` | Main window, menus, actions, tabs |
+| `sync_setup` | Launch gtk-sync install dialog; probe systemd server/client status |
 | `tab` | `GtkDirectoryList` + list/grid views, filter, sort |
 | `sidebar` | Places / bookmarks |
 | `pathbar` | Breadcrumbs + location entry |

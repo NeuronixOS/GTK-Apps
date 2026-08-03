@@ -1,8 +1,9 @@
 //! Places sidebar (Home, XDG dirs, Computer, Trash, USB mounts, favorites, bookmarks, recent).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gtk4 as gtk;
 use gtk::gdk;
@@ -11,6 +12,8 @@ use gtk::glib;
 use gtk::prelude::*;
 
 use crate::places;
+use crate::sync_setup;
+use crate::sync_status;
 use crate::util::{home_dir, xdg_user_dir};
 
 #[derive(Clone)]
@@ -21,14 +24,34 @@ pub enum Place {
     Trash,
     /// Opens the remembered-network connections picker.
     ConnectNetwork,
+    /// Opens the gtk-sync installer (server or client dialog).
+    SetupSync,
+}
+
+fn is_action_place(place: &Place) -> bool {
+    matches!(place, Place::ConnectNetwork | Place::SetupSync)
 }
 
 pub struct Sidebar {
-    pub root: gtk::ScrolledWindow,
+    pub root: gtk::Box,
     list: gtk::ListBox,
+    /// Keeps the docked panel alive; also registered via `transfer_panel::set_active`.
+    #[allow(dead_code)]
+    pub transfer: Rc<crate::transfer_panel::TransferPanel>,
     on_activate: RefCell<Option<Rc<dyn Fn(Place)>>>,
     on_open_tab: RefCell<Option<Rc<dyn Fn(Place)>>>,
     on_open_window: RefCell<Option<Rc<dyn Fn(Place)>>>,
+    on_remove_sync_client: RefCell<Option<Rc<dyn Fn()>>>,
+    on_remove_sync_server: RefCell<Option<Rc<dyn Fn()>>>,
+    /// Last probed gtk-sync fingerprint (avoid rebuild flicker while polling).
+    sync_fingerprint: RefCell<String>,
+    /// Last client status.json fingerprint (file emblems).
+    client_status_fingerprint: RefCell<String>,
+    /// Busy/phase only — rebuild Sync row icon when this changes.
+    client_busy_fingerprint: RefCell<String>,
+    on_client_status: RefCell<Option<Rc<dyn Fn()>>>,
+    /// Debounce Connect / Setup Sync — GTK can emit activate more than once per click.
+    last_action_at: Cell<Option<Instant>>,
     /// Keep VolumeMonitor alive for mount add/remove signals.
     _volume_monitor: gio::VolumeMonitor,
 }
@@ -40,48 +63,100 @@ impl Sidebar {
         list.set_activate_on_single_click(true);
         list.add_css_class("navigation-sidebar");
 
-        let root = gtk::ScrolledWindow::builder()
+        let scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
+            .hexpand(true)
             .child(&list)
             .build();
+
+        let transfer = crate::transfer_panel::TransferPanel::new();
+        crate::transfer_panel::set_active(&transfer);
+
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.set_hexpand(false);
+        root.set_vexpand(true);
+        root.append(&scroll);
+        root.append(&transfer.root);
 
         let monitor = gio::VolumeMonitor::get();
 
         let sb = Rc::new(Self {
             root,
             list: list.clone(),
+            transfer,
             on_activate: RefCell::new(None),
             on_open_tab: RefCell::new(None),
             on_open_window: RefCell::new(None),
+            on_remove_sync_client: RefCell::new(None),
+            on_remove_sync_server: RefCell::new(None),
+            sync_fingerprint: RefCell::new(String::new()),
+            client_status_fingerprint: RefCell::new(String::new()),
+            client_busy_fingerprint: RefCell::new(String::new()),
+            on_client_status: RefCell::new(None),
+            last_action_at: Cell::new(None),
             _volume_monitor: monitor.clone(),
         });
 
         sb.rebuild();
 
+        // Pick up gtk-sync server/client after install without restarting gtk-files.
+        {
+            let sb2 = Rc::clone(&sb);
+            glib::timeout_add_local(std::time::Duration::from_secs(8), move || {
+                sb2.refresh_sync_if_changed();
+                glib::ControlFlow::Continue
+            });
+        }
+        // Poll status.json for busy icon + per-file emblems (~1.5s).
+        // Also drive Setup Sync loading state while an install is in progress.
+        {
+            let sb2 = Rc::clone(&sb);
+            glib::timeout_add_local(std::time::Duration::from_millis(1500), move || {
+                let pending = sync_setup::setup_progress().is_some();
+                if pending {
+                    sync_setup::refresh_setup_detail_for_elapsed();
+                    sync_setup::tick_setup_progress();
+                }
+                sb2.poll_client_status();
+                if pending || sync_setup::setup_progress().is_some() {
+                    sb2.refresh_sync_if_changed();
+                }
+                // If still pending after tick (unit not up yet), ensure loading row stays.
+                // refresh_sync_if_changed only rebuilds on fingerprint change — when we
+                // first enter pending, notify_setup_progress already rebuilt.
+                glib::ControlFlow::Continue
+            });
+        }
+
+        // Split handlers so one click never runs both paths:
+        // - navigable places → row_selected only
+        // - action places (Connect / Setup Sync) → row_activated only (+ debounce)
         {
             let sb2 = Rc::clone(&sb);
             list.connect_row_activated(move |_, row| {
-                if let Some(place) = row_place(row) {
-                    if let Some(cb) = sb2.on_activate.borrow().as_ref() {
-                        cb(place);
-                    }
+                let Some(place) = row_place(row) else {
+                    return;
+                };
+                if !is_action_place(&place) {
+                    return;
                 }
+                sb2.emit_place(place);
             });
         }
-        // Also navigate on single left-click selection (more reliable than
-        // activate-on-single-click alone for Recent / place rows).
         {
             let sb2 = Rc::clone(&sb);
             list.connect_row_selected(move |_, row| {
                 let Some(row) = row else {
                     return;
                 };
-                if let Some(place) = row_place(row) {
-                    if let Some(cb) = sb2.on_activate.borrow().as_ref() {
-                        cb(place);
-                    }
+                let Some(place) = row_place(row) else {
+                    return;
+                };
+                if is_action_place(&place) {
+                    return;
                 }
+                sb2.emit_place(place);
             });
         }
 
@@ -115,12 +190,69 @@ impl Sidebar {
         *self.on_activate.borrow_mut() = Some(Rc::new(f));
     }
 
+    fn emit_place(&self, place: Place) {
+        if is_action_place(&place) {
+            let now = Instant::now();
+            if let Some(prev) = self.last_action_at.get() {
+                if now.duration_since(prev) < Duration::from_millis(750) {
+                    return;
+                }
+            }
+            self.last_action_at.set(Some(now));
+        }
+        if let Some(cb) = self.on_activate.borrow().as_ref() {
+            cb(place);
+        }
+    }
+
     pub fn set_on_open_tab<F: Fn(Place) + 'static>(&self, f: F) {
         *self.on_open_tab.borrow_mut() = Some(Rc::new(f));
     }
 
     pub fn set_on_open_window<F: Fn(Place) + 'static>(&self, f: F) {
         *self.on_open_window.borrow_mut() = Some(Rc::new(f));
+    }
+
+    pub fn set_on_remove_sync_client<F: Fn() + 'static>(&self, f: F) {
+        *self.on_remove_sync_client.borrow_mut() = Some(Rc::new(f));
+    }
+
+    pub fn set_on_remove_sync_server<F: Fn() + 'static>(&self, f: F) {
+        *self.on_remove_sync_server.borrow_mut() = Some(Rc::new(f));
+    }
+
+    pub fn set_on_client_status<F: Fn() + 'static>(&self, f: F) {
+        *self.on_client_status.borrow_mut() = Some(Rc::new(f));
+    }
+
+    fn poll_client_status(self: &Rc<Self>) {
+        let status = sync_status::load_client_status();
+        let busy_fp = status
+            .as_ref()
+            .map(|s| format!("{}", s.is_transferring()))
+            .unwrap_or_else(|| "false".into());
+        let full_fp = status
+            .as_ref()
+            .map(|s| s.fingerprint())
+            .unwrap_or_default();
+
+        if busy_fp != *self.client_busy_fingerprint.borrow() {
+            *self.client_busy_fingerprint.borrow_mut() = busy_fp;
+            self.rebuild();
+            // Still notify so the header chip refreshes immediately.
+            if let Some(cb) = self.on_client_status.borrow().as_ref() {
+                cb();
+            }
+            return;
+        }
+
+        if full_fp == *self.client_status_fingerprint.borrow() {
+            return;
+        }
+        *self.client_status_fingerprint.borrow_mut() = full_fp;
+        if let Some(cb) = self.on_client_status.borrow().as_ref() {
+            cb();
+        }
     }
 
     pub fn rebuild(self: &Rc<Self>) {
@@ -201,7 +333,8 @@ impl Sidebar {
                 "Connect to Network…",
                 place.clone(),
             );
-            // No context menu / middle-click tab for the action row.
+            // Action row: activate only (not selectable) so one click ≠ two dialogs.
+            row.set_selectable(false);
             self.list.append(&row);
         }
         if network_home.is_dir() {
@@ -213,6 +346,59 @@ impl Sidebar {
         for mount in net_mounts {
             let row = make_network_mount_row(&mount, Rc::clone(self));
             self.list.append(&row);
+        }
+
+        // Sync section: Active → Setup Sync (directly under it) → client folder.
+        sync_status::invalidate_sync_cache();
+        let sync = sync_setup::probe_sync_status();
+        *self.sync_fingerprint.borrow_mut() = sync.fingerprint();
+        if let Some(st) = sync_status::load_client_status() {
+            *self.client_status_fingerprint.borrow_mut() = st.fingerprint();
+            *self.client_busy_fingerprint.borrow_mut() = format!("{}", st.is_transferring());
+        } else {
+            *self.client_status_fingerprint.borrow_mut() = String::new();
+            *self.client_busy_fingerprint.borrow_mut() = String::new();
+        }
+        self.list.append(&make_header("Sync"));
+        let sync_progress = sync_setup::setup_progress();
+        if let Some(server) = sync.server.as_ref() {
+            self.list
+                .append(&make_server_status_row(&server.endpoint_label(), Rc::clone(self)));
+        } else if let Some(progress) = sync_progress
+            .as_ref()
+            .filter(|p| p.kind == sync_setup::SetupKind::Server)
+        {
+            self.list
+                .append(&make_sync_setup_pending_row(progress));
+        }
+        {
+            let place = Place::SetupSync;
+            let row = make_row_compact(
+                "list-add-symbolic",
+                "Setup Sync",
+                place,
+            );
+            row.set_selectable(false);
+            self.list.append(&row);
+        }
+        if let Some(root) = sync.client_root {
+            let name = root
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| root.display().to_string());
+            let tip = root.display().to_string();
+            let place = Place::Path(root);
+            let busy = sync_status::load_client_status()
+                .map(|s| s.is_transferring())
+                .unwrap_or(false);
+            let row = make_sync_client_row(&name, &tip, place, busy, Rc::clone(self));
+            self.list.append(&row);
+        } else if let Some(progress) = sync_progress
+            .as_ref()
+            .filter(|p| p.kind == sync_setup::SetupKind::Client)
+        {
+            self.list
+                .append(&make_sync_setup_pending_row(progress));
         }
 
         let data = places::load();
@@ -305,6 +491,32 @@ impl Sidebar {
                 return;
             }
             i += 1;
+        }
+    }
+
+    /// Rebuild sidebar if gtk-sync server/client status changed.
+    pub fn refresh_sync_if_changed(self: &Rc<Self>) {
+        let sync = sync_setup::probe_sync_status();
+        let fp = sync.fingerprint();
+        if fp != *self.sync_fingerprint.borrow() {
+            *self.sync_fingerprint.borrow_mut() = fp;
+            crate::sync_status::invalidate_sync_cache();
+            self.rebuild();
+            // Header chip must clear when the client disappears even if a stale
+            // status.json fingerprint did not change.
+            if let Some(cb) = self.on_client_status.borrow().as_ref() {
+                cb();
+            }
+        }
+    }
+
+    /// Force a sync-status refresh (e.g. after launching the installer).
+    pub fn refresh_sync_soon(self: &Rc<Self>) {
+        for secs in [2u32, 6, 15] {
+            let sb = Rc::clone(self);
+            glib::timeout_add_local_once(std::time::Duration::from_secs(secs.into()), move || {
+                sb.refresh_sync_if_changed();
+            });
         }
     }
 }
@@ -406,18 +618,198 @@ fn make_header(text: &str) -> gtk::ListBoxRow {
     row
 }
 
+/// Non-activatable two-line server status: "Active" + indented host:port.
+fn make_server_status_row(endpoint: &str, sidebar: Rc<Sidebar>) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    row.set_selectable(false);
+    row.set_activatable(false);
+
+    let outer = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    outer.set_margin_start(16);
+    outer.set_margin_end(4);
+    outer.set_margin_top(1);
+    outer.set_margin_bottom(4);
+
+    let image = gtk::Image::from_icon_name("network-server-symbolic");
+    image.set_valign(gtk::Align::Start);
+    image.add_css_class("dim-label");
+
+    let texts = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    texts.set_hexpand(true);
+
+    let active = gtk::Label::new(Some("Active"));
+    active.set_xalign(0.0);
+    active.add_css_class("caption");
+
+    let host = gtk::Label::new(Some(endpoint));
+    host.set_xalign(0.0);
+    host.set_margin_start(8);
+    host.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    host.add_css_class("caption");
+    host.add_css_class("dim-label");
+    host.set_tooltip_text(Some(endpoint));
+
+    texts.append(&active);
+    texts.append(&host);
+    outer.append(&image);
+    outer.append(&texts);
+
+    let remove = gtk::Button::from_icon_name("list-remove-symbolic");
+    remove.add_css_class("flat");
+    remove.add_css_class("circular");
+    remove.set_tooltip_text(Some("Uninstall sync server…"));
+    remove.set_valign(gtk::Align::Start);
+    remove.set_focus_on_click(false);
+    remove.connect_clicked(move |_| {
+        if let Some(cb) = sidebar.on_remove_sync_server.borrow().as_ref() {
+            cb();
+        }
+    });
+    outer.append(&remove);
+
+    row.set_child(Some(&outer));
+    row.set_widget_name("sync-status");
+    row
+}
+
+/// Loading row while Setup Sync install is running / waiting for the unit.
+fn make_sync_setup_pending_row(progress: &sync_setup::SetupProgress) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    row.set_selectable(false);
+    row.set_activatable(false);
+
+    let outer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    outer.set_margin_start(16);
+    outer.set_margin_end(8);
+    outer.set_margin_top(4);
+    outer.set_margin_bottom(4);
+
+    let spinner = gtk::Spinner::new();
+    spinner.set_spinning(true);
+    spinner.set_valign(gtk::Align::Center);
+    spinner.set_size_request(16, 16);
+
+    let texts = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    texts.set_hexpand(true);
+
+    let title = match progress.kind {
+        sync_setup::SetupKind::Server => "Setting up server…",
+        sync_setup::SetupKind::Client => "Setting up client…",
+    };
+    let head = gtk::Label::new(Some(title));
+    head.set_xalign(0.0);
+    head.add_css_class("caption");
+
+    let detail = gtk::Label::new(Some(&progress.detail));
+    detail.set_xalign(0.0);
+    detail.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    detail.add_css_class("caption");
+    detail.add_css_class("dim-label");
+    detail.set_tooltip_text(Some(
+        "Setup is still running. This can take a minute while packages and services start.",
+    ));
+
+    texts.append(&head);
+    texts.append(&detail);
+    outer.append(&spinner);
+    outer.append(&texts);
+
+    row.set_child(Some(&outer));
+    row.set_widget_name("sync-setup-pending");
+    row
+}
+
+/// Sync client folder row with disconnect control (keeps files on disk).
+fn make_sync_client_row(
+    name: &str,
+    tip: &str,
+    place: Place,
+    busy: bool,
+    sidebar: Rc<Sidebar>,
+) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    let box_ = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    box_.set_margin_start(8);
+    box_.set_margin_end(4);
+    box_.set_margin_top(2);
+    box_.set_margin_bottom(2);
+
+    let image = if busy {
+        let img = gtk::Image::from_icon_name("view-refresh-symbolic");
+        img.set_tooltip_text(Some("Syncing…"));
+        img
+    } else {
+        gtk::Image::from_icon_name("folder-symbolic")
+    };
+    let lbl = gtk::Label::new(Some(name));
+    lbl.set_xalign(0.0);
+    lbl.set_hexpand(true);
+    lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    box_.append(&image);
+    box_.append(&lbl);
+
+    let disconnect = gtk::Button::from_icon_name("media-eject-symbolic");
+    disconnect.add_css_class("flat");
+    disconnect.add_css_class("circular");
+    disconnect.set_tooltip_text(Some("Disconnect sync folder…"));
+    disconnect.set_valign(gtk::Align::Center);
+    disconnect.set_focus_on_click(false);
+    {
+        let sidebar = Rc::clone(&sidebar);
+        disconnect.connect_clicked(move |btn| {
+            if let Some(row) = btn
+                .ancestor(gtk::ListBoxRow::static_type())
+                .and_downcast::<gtk::ListBoxRow>()
+            {
+                row.set_activatable(false);
+                glib::idle_add_local_once({
+                    let row = row.clone();
+                    move || row.set_activatable(true)
+                });
+            }
+            if let Some(cb) = sidebar.on_remove_sync_client.borrow().as_ref() {
+                cb();
+            }
+        });
+    }
+    box_.append(&disconnect);
+
+    row.set_child(Some(&box_));
+    row.set_tooltip_text(Some(tip));
+    row.set_widget_name("place");
+    set_row_place(&row, place.clone());
+    install_place_context_menu(
+        &row,
+        place,
+        sidebar,
+        Some(PlaceRemove::SyncClient),
+    );
+    row
+}
+
 fn make_row(icon: &str, label: &str, place: Place) -> gtk::ListBoxRow {
+    make_row_styled(icon, label, place, false)
+}
+
+fn make_row_compact(icon: &str, label: &str, place: Place) -> gtk::ListBoxRow {
+    make_row_styled(icon, label, place, true)
+}
+
+fn make_row_styled(icon: &str, label: &str, place: Place, compact: bool) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::new();
     let box_ = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    box_.set_margin_start(8);
+    box_.set_margin_start(if compact { 16 } else { 8 });
     box_.set_margin_end(8);
-    box_.set_margin_top(4);
-    box_.set_margin_bottom(4);
+    box_.set_margin_top(if compact { 1 } else { 4 });
+    box_.set_margin_bottom(if compact { 2 } else { 4 });
     let image = gtk::Image::from_icon_name(icon);
     let lbl = gtk::Label::new(Some(label));
     lbl.set_xalign(0.0);
     lbl.set_hexpand(true);
     lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    if compact {
+        lbl.add_css_class("caption");
+    }
     box_.append(&image);
     box_.append(&lbl);
     row.set_child(Some(&box_));
@@ -428,6 +820,7 @@ fn make_row(icon: &str, label: &str, place: Place) -> gtk::ListBoxRow {
         Place::Path(_) | Place::Uri(_) => "place",
         Place::Trash => "trash",
         Place::ConnectNetwork => "connect-network",
+        Place::SetupSync => "setup-sync",
     });
     set_row_place(&row, place);
     row
@@ -547,6 +940,7 @@ enum PlaceRemove {
         path: Option<PathBuf>,
         uri: Option<String>,
     },
+    SyncClient,
 }
 
 impl PlaceRemove {
@@ -554,6 +948,7 @@ impl PlaceRemove {
         match self {
             PlaceRemove::Favorite(_) => "Remove from Favorites",
             PlaceRemove::Bookmark { .. } => "Remove Bookmark",
+            PlaceRemove::SyncClient => "Disconnect Sync Folder…",
         }
     }
 }
@@ -592,23 +987,28 @@ fn install_place_context_menu(
         let sidebar = Rc::clone(&sidebar);
         let act = gio::SimpleAction::new("remove", None);
         act.connect_activate(move |_, _| {
-            let removed = match &remove {
+            match &remove {
                 PlaceRemove::Favorite(p) => {
                     places::remove_favorite(p);
-                    true
+                    sidebar.rebuild();
                 }
                 PlaceRemove::Bookmark { path, uri } => {
-                    if let Some(p) = path {
+                    let removed = if let Some(p) = path {
                         places::remove_bookmark(p)
                     } else if let Some(u) = uri {
                         places::remove_bookmark_uri(u)
                     } else {
                         false
+                    };
+                    if removed {
+                        sidebar.rebuild();
                     }
                 }
-            };
-            if removed {
-                sidebar.rebuild();
+                PlaceRemove::SyncClient => {
+                    if let Some(cb) = sidebar.on_remove_sync_client.borrow().as_ref() {
+                        cb();
+                    }
+                }
             }
         });
         group.add_action(&act);
@@ -691,6 +1091,7 @@ fn set_row_place(row: &gtk::ListBoxRow, place: Place) {
         Place::Path(p) => format!("path:{}", p.to_string_lossy()),
         Place::Uri(u) => format!("uri:{u}"),
         Place::ConnectNetwork => "connect-network".to_string(),
+        Place::SetupSync => "setup-sync".to_string(),
     };
     unsafe {
         row.set_data("gtk-files-place", encoded);
@@ -711,6 +1112,9 @@ fn row_place(row: &gtk::ListBoxRow) -> Option<Place> {
             if encoded == "connect-network" {
                 return Some(Place::ConnectNetwork);
             }
+            if encoded == "setup-sync" {
+                return Some(Place::SetupSync);
+            }
             if let Some(rest) = encoded.strip_prefix("path:") {
                 return Some(Place::Path(PathBuf::from(rest)));
             }
@@ -724,6 +1128,9 @@ fn row_place(row: &gtk::ListBoxRow) -> Option<Place> {
     }
     if name == "connect-network" {
         return Some(Place::ConnectNetwork);
+    }
+    if name == "setup-sync" {
+        return Some(Place::SetupSync);
     }
     None
 }

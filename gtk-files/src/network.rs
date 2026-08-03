@@ -1,5 +1,6 @@
 //! Network / remote mounts (SFTP, FTP, SMB, WebDAV) via GVFS.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -13,6 +14,26 @@ use crate::places;
 use crate::util::{home_dir, show_error};
 
 const NETWORK_SCHEMES: &[&str] = &["sftp", "ssh", "ftp", "ftps", "smb", "dav", "davs", "nfs"];
+
+thread_local! {
+    /// Prevents a second Connect dialog when the sidebar fires activate twice.
+    static CONNECT_UI_OPEN: Cell<bool> = const { Cell::new(false) };
+}
+
+fn try_begin_connect_ui() -> bool {
+    CONNECT_UI_OPEN.with(|c| {
+        if c.get() {
+            false
+        } else {
+            c.set(true);
+            true
+        }
+    })
+}
+
+fn end_connect_ui() {
+    CONNECT_UI_OPEN.with(|c| c.set(false));
+}
 
 /// `~/Network` — local shortcuts (symlinks) to mounted remotes.
 pub fn network_home_dir() -> PathBuf {
@@ -199,6 +220,10 @@ fn wire_dismissible_dialog(dialog: &gtk::Window, parent: &impl IsA<gtk::Window>)
         dialog.set_application(Some(&app));
     }
 
+    dialog.connect_destroy(|_| {
+        end_connect_ui();
+    });
+
     {
         let d = dialog.clone();
         dialog.connect_close_request(move |_| {
@@ -383,6 +408,10 @@ pub fn show_network_picker(
     parent: &impl IsA<gtk::Window>,
     on_mounted: Rc<dyn Fn(gio::File)>,
 ) {
+    if !try_begin_connect_ui() {
+        return;
+    }
+
     let connections = places::load_network_connections();
     // No saved remotes yet → go straight to the new-connection form.
     if connections.is_empty() {
@@ -528,7 +557,10 @@ pub fn show_network_picker(
             let parent = parent.clone();
             let on_mounted = Rc::clone(&on_mounted);
             glib::idle_add_local_once(move || {
-                show_connect_dialog(&parent, on_mounted);
+                // Picker destroy clears CONNECT_UI_OPEN; claim it again for the form.
+                if try_begin_connect_ui() {
+                    show_connect_dialog(&parent, on_mounted);
+                }
             });
         });
     }

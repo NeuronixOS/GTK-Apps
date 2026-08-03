@@ -116,7 +116,7 @@ fn build_ui(app: &gtk::Application) {
 
     // ---- header bar ----------------------------------------------------
     let header = gtk::HeaderBar::new();
-    header.set_show_title_buttons(true);
+    gtk_theme::prepare_headerbar(&header);
 
     let base_label = gtk::Label::new(Some("Base:"));
     base_label.add_css_class("dim-label");

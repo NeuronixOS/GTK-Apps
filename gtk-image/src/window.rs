@@ -68,6 +68,7 @@ impl ImageWindow {
         main_box.append(&status_box);
 
         let header = gtk::HeaderBar::new();
+        gtk_theme::prepare_headerbar(&header);
         header.set_title_widget(Some(&title_label));
 
         let open_btn = gtk::Button::from_icon_name("document-open-symbolic");

@@ -118,7 +118,7 @@ impl CalcWindow {
 
         // Compact header: Undo | mode (title) | history + menu
         let header = gtk::HeaderBar::new();
-        header.set_show_title_buttons(true);
+        gtk_theme::prepare_headerbar(&header);
         header.set_title_widget(Some(&mode_button));
 
         let undo_btn = gtk_theme::labeled_button("edit-undo-symbolic", "Undo");
