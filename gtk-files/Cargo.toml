@@ -21,6 +21,7 @@ dirs = "5"
 libc = "0.2"
 regex = "1"
 gtk-theme = { path = "../gtk-theme" }
+gtk-neuron = { path = "../gtk-neuron" }
 
 [profile.release]
 lto = true

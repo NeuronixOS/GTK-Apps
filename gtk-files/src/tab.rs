@@ -1,6 +1,6 @@
 //! Folder tab: expandable tree list + grid views, filter, and sort.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -308,7 +308,6 @@ impl FolderTab {
         self.location.borrow().path()
     }
 
-    #[allow(dead_code)]
     pub fn is_trash(&self) -> bool {
         util::is_trash_location(&self.location.borrow())
     }
@@ -1188,16 +1187,50 @@ fn selected_paths_flat(selection: &gtk::MultiSelection, dir: &gio::File) -> Vec<
     paths
 }
 
+/// Modifier state for click gestures — gesture state alone often misses Ctrl/Shift.
+fn event_modifiers(gesture: &impl IsA<gtk::Gesture>) -> gdk::ModifierType {
+    let gesture = gesture.as_ref();
+    let mut mods = gesture.current_event_state();
+    if let Some(event) = gesture.current_event() {
+        mods |= event.modifier_state();
+    }
+    if let Some(display) = gdk::Display::default() {
+        if let Some(seat) = display.default_seat() {
+            if let Some(pointer) = seat.pointer() {
+                mods |= pointer.modifier_state();
+            }
+        }
+    }
+    mods
+}
+
+fn selection_add(selection: &gtk::MultiSelection, pos: u32) {
+    // unselect_rest = false → keep the existing cherry-pick set.
+    let _ = selection.select_item(pos, false);
+}
+
+fn selection_remove(selection: &gtk::MultiSelection, pos: u32) {
+    let _ = selection.unselect_item(pos);
+}
+
+fn selection_set_exclusive(selection: &gtk::MultiSelection, pos: u32) {
+    let _ = selection.select_item(pos, true);
+}
+
 /// File-manager style selection: click, Ctrl+click toggle, Shift+click range.
+///
+/// Returns `Some(pos)` when Ctrl+click hit an already-selected item — caller
+/// should unselect that item on gesture **release** if no drag started (so
+/// Ctrl+drag MOVE still works on a cherry-picked set).
 fn apply_pointer_selection(
     selection: &gtk::MultiSelection,
     anchor: &RefCell<Option<u32>>,
     pos: u32,
     mods: gdk::ModifierType,
-) {
+) -> Option<u32> {
     let n = selection.n_items();
     if n == 0 || pos >= n {
-        return;
+        return None;
     }
 
     let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
@@ -1209,22 +1242,32 @@ fn apply_pointer_selection(
         let (lo, hi) = if start <= pos { (start, pos) } else { (pos, start) };
         // Shift replaces with the range; Ctrl+Shift adds the range.
         selection.select_range(lo, hi - lo + 1, !ctrl);
-        return;
+        return None;
     }
 
     if ctrl {
+        // Cherry-pick: add immediately; defer remove until release so Ctrl+drag
+        // of an already-selected item keeps the multi-selection.
         if selection.is_selected(pos) {
-            selection.unselect_item(pos);
-        } else {
-            selection.select_item(pos, false);
+            *anchor.borrow_mut() = Some(pos);
+            return Some(pos);
         }
+        selection_add(selection, pos);
         *anchor.borrow_mut() = Some(pos);
-        return;
+        return None;
     }
 
-    selection.unselect_all();
-    selection.select_item(pos, true);
+    // Plain click on an already-selected item keeps the multi-selection so
+    // Ctrl-cherry-picked files can be dragged / copied / pasted together.
+    // Clicking an unselected item becomes exclusive select.
+    if selection.is_selected(pos) {
+        *anchor.borrow_mut() = Some(pos);
+        return None;
+    }
+
+    selection_set_exclusive(selection, pos);
     *anchor.borrow_mut() = Some(pos);
+    None
 }
 
 fn update_status_label(label: &gtk::Label, selection: &impl IsA<gtk::SelectionModel>) {
@@ -1308,39 +1351,61 @@ fn build_tree_column_view(
                 let target = Rc::clone(&target);
                 let on_open = Rc::clone(&on_open);
                 let selection = selection.clone();
+                let selection_release = selection.clone();
                 let anchor = Rc::clone(&anchor);
                 let list_item = item.clone();
                 let row_focus = row.clone();
+                let pending_ctrl_toggle = Rc::new(Cell::new(None::<u32>));
                 let gesture = gtk::GestureClick::new();
                 gesture.set_button(1);
-                // Bubble (not Capture) + no Claim on single-press so DragSource
-                // can start a click-and-hold drag to other apps / folders.
-                gesture.connect_pressed(move |g, n_press, _, _| {
-                    let pos = list_item.position();
-                    let mods = g.current_event_state();
-                    apply_pointer_selection(&selection, &anchor, pos, mods);
-                    // Take focus from the terminal so keyboard ops target files.
-                    if let Some(view) = row_focus.ancestor(gtk::ColumnView::static_type()) {
-                        view.grab_focus();
-                    }
-                    let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
-                    let shift = mods.contains(gdk::ModifierType::SHIFT_MASK);
-                    // Claim Ctrl toggles only. Do NOT claim Shift — Shift+drag is
-                    // MOVE in file managers; claiming steals the sequence from
-                    // DragSource and crashes GTK.
-                    if ctrl {
-                        g.set_state(gtk::EventSequenceState::Claimed);
-                    }
-                    if n_press >= 2 && !ctrl && !shift {
-                        let paths = selected_paths_tree(&selection);
-                        if !open_multi_folder_selection(&paths, &on_open) {
-                            if let Some((file, is_dir, _)) = target.borrow().clone() {
-                                open_resolved(&on_open, file, is_dir);
-                            }
+                // Bubble + no Claim on single-press so DragSource can start a drag.
+                {
+                    let pending_ctrl_toggle = Rc::clone(&pending_ctrl_toggle);
+                    gesture.connect_pressed(move |g, n_press, _, _| {
+                        let pos = list_item.position();
+                        let mods = event_modifiers(g);
+                        let pending = apply_pointer_selection(&selection, &anchor, pos, mods);
+                        pending_ctrl_toggle.set(pending);
+                        // Take focus from the terminal so keyboard ops target files.
+                        if let Some(view) = row_focus.ancestor(gtk::ColumnView::static_type()) {
+                            view.grab_focus();
                         }
-                        g.set_state(gtk::EventSequenceState::Claimed);
-                    }
-                });
+                        let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
+                        let shift = mods.contains(gdk::ModifierType::SHIFT_MASK);
+                        // Claim Ctrl/Shift so ColumnView cannot undo the multi-select.
+                        // MOVE is decided at drop time (Ctrl held then), so claiming
+                        // Ctrl+click does not break dragging an already-selected set.
+                        if ctrl || shift {
+                            g.set_state(gtk::EventSequenceState::Claimed);
+                        }
+                        if n_press >= 2 && !ctrl && !shift {
+                            pending_ctrl_toggle.set(None);
+                            let paths = selected_paths_tree(&selection);
+                            if !open_multi_folder_selection(&paths, &on_open) {
+                                if let Some((file, is_dir, _)) = target.borrow().clone() {
+                                    open_resolved(&on_open, file, is_dir);
+                                }
+                            }
+                            g.set_state(gtk::EventSequenceState::Claimed);
+                        }
+                    });
+                }
+                {
+                    let pending_ctrl_toggle = Rc::clone(&pending_ctrl_toggle);
+                    gesture.connect_released(move |_, _, _, _| {
+                        if let Some(pos) = pending_ctrl_toggle.take() {
+                            // Ctrl+click (no drag): toggle off this already-selected item.
+                            selection_remove(&selection_release, pos);
+                        }
+                    });
+                }
+                {
+                    let pending_ctrl_toggle = Rc::clone(&pending_ctrl_toggle);
+                    gesture.connect_cancel(move |_, _| {
+                        // Drag started (or gesture aborted) — keep selection.
+                        pending_ctrl_toggle.set(None);
+                    });
+                }
                 row.add_controller(gesture);
             }
             // Right-click: keep multi-selection if this item is already selected.
@@ -1502,6 +1567,8 @@ fn append_info_columns(view: &gtk::ColumnView) {
         let factory = gtk::SignalListItemFactory::new();
         factory.connect_setup(move |_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+            // Must match Name column — otherwise clicks here exclusive-select.
+            item.set_selectable(false);
             let label = gtk::Label::new(None);
             label.set_xalign(1.0);
             label.add_css_class("dim-label");
@@ -1532,6 +1599,7 @@ fn append_info_columns(view: &gtk::ColumnView) {
         let factory = gtk::SignalListItemFactory::new();
         factory.connect_setup(move |_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+            item.set_selectable(false);
             let label = gtk::Label::new(None);
             label.set_xalign(0.0);
             label.add_css_class("dim-label");
@@ -1563,6 +1631,7 @@ fn append_info_columns(view: &gtk::ColumnView) {
         let factory = gtk::SignalListItemFactory::new();
         factory.connect_setup(move |_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+            item.set_selectable(false);
             let label = gtk::Label::new(None);
             label.set_xalign(0.0);
             label.add_css_class("dim-label");
@@ -1589,6 +1658,7 @@ fn append_info_columns(view: &gtk::ColumnView) {
         let factory = gtk::SignalListItemFactory::new();
         factory.connect_setup(move |_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+            item.set_selectable(false);
             let label = gtk::Label::new(None);
             label.set_xalign(0.0);
             label.add_css_class("dim-label");
@@ -1670,38 +1740,57 @@ fn build_grid_view(
             let anchor = Rc::clone(&anchor_for_factory);
             let list_item = item.clone();
             let box_focus = box_.clone();
+            let pending_ctrl_toggle = Rc::new(Cell::new(None::<u32>));
             let gesture = gtk::GestureClick::new();
             gesture.set_button(1);
-            // Bubble (not Capture) + no Claim on single-press so DragSource
-            // can start a click-and-hold drag to other apps / folders.
-            gesture.connect_pressed(move |g, n_press, _, _| {
-                let pos = list_item.position();
-                let mods = g.current_event_state();
-                apply_pointer_selection(&selection, &anchor, pos, mods);
-                if let Some(view) = box_focus.ancestor(gtk::GridView::static_type()) {
-                    view.grab_focus();
-                }
-                let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
-                let shift = mods.contains(gdk::ModifierType::SHIFT_MASK);
-                // Claim Ctrl only — Shift+drag must reach DragSource (MOVE).
-                if ctrl {
-                    g.set_state(gtk::EventSequenceState::Claimed);
-                }
-                if n_press >= 2 && !ctrl && !shift {
-                    let parent = target
-                        .borrow()
-                        .as_ref()
-                        .and_then(|(_, _, p)| p.parent().map(gio::File::for_path))
-                        .unwrap_or_else(|| gio::File::for_path("/"));
-                    let paths = selected_paths_flat(&selection, &parent);
-                    if !open_multi_folder_selection(&paths, &on_open) {
-                        if let Some((file, is_dir, _)) = target.borrow().clone() {
-                            open_resolved(&on_open, file, is_dir);
-                        }
+            // Bubble + no Claim on single-press so DragSource can start a drag.
+            {
+                let pending_ctrl_toggle = Rc::clone(&pending_ctrl_toggle);
+                gesture.connect_pressed(move |g, n_press, _, _| {
+                    let pos = list_item.position();
+                    let mods = event_modifiers(g);
+                    let pending = apply_pointer_selection(&selection, &anchor, pos, mods);
+                    pending_ctrl_toggle.set(pending);
+                    if let Some(view) = box_focus.ancestor(gtk::GridView::static_type()) {
+                        view.grab_focus();
                     }
-                    g.set_state(gtk::EventSequenceState::Claimed);
-                }
-            });
+                    let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
+                    let shift = mods.contains(gdk::ModifierType::SHIFT_MASK);
+                    if ctrl || shift {
+                        g.set_state(gtk::EventSequenceState::Claimed);
+                    }
+                    if n_press >= 2 && !ctrl && !shift {
+                        pending_ctrl_toggle.set(None);
+                        let parent = target
+                            .borrow()
+                            .as_ref()
+                            .and_then(|(_, _, p)| p.parent().map(gio::File::for_path))
+                            .unwrap_or_else(|| gio::File::for_path("/"));
+                        let paths = selected_paths_flat(&selection, &parent);
+                        if !open_multi_folder_selection(&paths, &on_open) {
+                            if let Some((file, is_dir, _)) = target.borrow().clone() {
+                                open_resolved(&on_open, file, is_dir);
+                            }
+                        }
+                        g.set_state(gtk::EventSequenceState::Claimed);
+                    }
+                });
+            }
+            {
+                let selection = selection_for_factory.clone();
+                let pending_ctrl_toggle = Rc::clone(&pending_ctrl_toggle);
+                gesture.connect_released(move |_, _, _, _| {
+                    if let Some(pos) = pending_ctrl_toggle.take() {
+                        selection_remove(&selection, pos);
+                    }
+                });
+            }
+            {
+                let pending_ctrl_toggle = Rc::clone(&pending_ctrl_toggle);
+                gesture.connect_cancel(move |_, _| {
+                    pending_ctrl_toggle.set(None);
+                });
+            }
             box_.add_controller(gesture);
         }
         {

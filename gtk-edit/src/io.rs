@@ -109,6 +109,8 @@ pub fn load_path(
         *doc.mtime.borrow_mut() = meta.modified().ok();
         *doc.readonly.borrow_mut() = meta.permissions().readonly();
     }
+    *doc.ignored_disk_mtime.borrow_mut() = None;
+    doc.disk_change_prompt_open.set(false);
     doc.apply_editor_config(cfg);
     Ok(())
 }
@@ -147,6 +149,8 @@ pub fn save_path(doc: &Document, path: &Path, cfg: &EditorConfig) -> Result<(), 
     if let Ok(meta) = fs::metadata(path) {
         *doc.mtime.borrow_mut() = meta.modified().ok();
     }
+    *doc.ignored_disk_mtime.borrow_mut() = None;
+    doc.disk_change_prompt_open.set(false);
     Ok(())
 }
 
@@ -158,9 +162,24 @@ pub fn externally_modified(doc: &Document) -> bool {
         return false;
     };
     match fs::metadata(&path).and_then(|m| m.modified()) {
-        Ok(new) => new > old,
+        Ok(new) => {
+            if new <= old {
+                return false;
+            }
+            // User already chose Ignore for this disk revision.
+            if doc.ignored_disk_mtime.borrow().as_ref() == Some(&new) {
+                return false;
+            }
+            true
+        }
         Err(_) => false,
     }
+}
+
+/// Current on-disk mtime (if the file still exists).
+pub fn disk_mtime(doc: &Document) -> Option<SystemTime> {
+    let path = doc.path()?;
+    fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 pub fn show_io_error(parent: &impl IsA<gtk::Window>, title: &str, message: &str) {

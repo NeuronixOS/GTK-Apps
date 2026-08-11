@@ -14,7 +14,7 @@ use sourceview5::prelude::*;
 
 use crate::config::Config;
 use crate::documents_panel::DocumentsPanel;
-use crate::io::{self, externally_modified, load_path, save_path, show_io_error};
+use crate::io::{self, disk_mtime, externally_modified, load_path, save_path, show_io_error};
 use crate::panel::Panel;
 use crate::plugin::{PluginEngine, WindowContext};
 use crate::prefs;
@@ -142,9 +142,10 @@ impl EditorWindow {
 
         let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
         outer.add_css_class("gtk-content");
+        outer.set_hexpand(true);
+        outer.set_vexpand(true);
         outer.append(&hpaned);
         outer.append(&statusbar.root);
-        window.set_child(Some(&outer));
 
         let this = Rc::new(Self {
             window: window.clone(),
@@ -170,6 +171,9 @@ impl EditorWindow {
         unsafe {
             window.set_data(WINDOW_STATE_KEY, Rc::clone(&this));
         }
+
+        // Wraps `outer` in the driving-mode shell and sets it as the window child.
+        crate::neuron::attach(&header, &window, &outer, &this);
 
         {
             let first_nb = this.groups.borrow()[0].clone();
@@ -425,13 +429,15 @@ impl EditorWindow {
                 this.update_statusbar();
             });
         }
-        // Clicking into a document view should retarget the terminal cwd.
+        // Clicking into a document view should retarget the terminal cwd and
+        // check whether the file changed on disk.
         {
             let this = Rc::clone(&this);
             let tab_c = Rc::clone(tab);
             let focus = gtk::EventControllerFocus::new();
             focus.connect_enter(move |_| {
                 this.sync_terminal_for_tab(&tab_c);
+                this.check_external_change(&tab_c);
             });
             tab.view.add_controller(focus);
         }
@@ -677,7 +683,76 @@ impl EditorWindow {
         if externally_modified(&tab.document) {
             self.statusbar
                 .flash("File changed on disk");
+            self.check_external_change(&tab);
         }
+    }
+
+    /// Prompt Reload / Ignore when the on-disk file is newer than the buffer.
+    pub fn check_external_change(&self, tab: &Rc<EditorTab>) {
+        if !externally_modified(&tab.document) {
+            return;
+        }
+        if tab.document.disk_change_prompt_open.get() {
+            return;
+        }
+        let Some(path) = tab.document.path() else {
+            return;
+        };
+        let Some(on_disk) = disk_mtime(&tab.document) else {
+            return;
+        };
+
+        tab.document.disk_change_prompt_open.set(true);
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+        let dirty = tab.document.is_modified();
+        let detail = if dirty {
+            "The file was modified by another program. Reloading will discard your unsaved changes."
+        } else {
+            "The file was modified by another program."
+        };
+
+        let dialog = gtk::AlertDialog::builder()
+            .modal(true)
+            .message(format!("“{name}” changed on disk"))
+            .detail(detail)
+            .buttons(["Ignore", "Reload"])
+            .cancel_button(0)
+            .default_button(1)
+            .build();
+
+        let win = self.window.clone();
+        let tab = Rc::clone(tab);
+        dialog.choose(Some(&win.clone()), None::<&gio::Cancellable>, move |res| {
+            tab.document.disk_change_prompt_open.set(false);
+            let Ok(choice) = res else {
+                return;
+            };
+            if choice == 1 {
+                // Reload
+                let Some(this) = current_from_window(&win) else {
+                    return;
+                };
+                let cfg = this.config.borrow().clone();
+                if let Some(path) = tab.document.path() {
+                    if let Err(e) = load_path(
+                        &tab.document,
+                        &path,
+                        &cfg.editor,
+                        &cfg.encodings.auto_detected,
+                    ) {
+                        show_io_error(&this.window, "Reload failed", &e);
+                    }
+                    tab.refresh_title();
+                    this.update_statusbar();
+                }
+            } else {
+                // Ignore this disk revision until it changes again.
+                *tab.document.ignored_disk_mtime.borrow_mut() = Some(on_disk);
+            }
+        });
     }
 
     pub fn apply_config(&self) {
@@ -813,6 +888,7 @@ fn build_menubar(
         "view-dual-symbolic",
     );
     icons.append_action(&view, "Fullscreen", "win.fullscreen");
+    gtk_neuron::append_driving_menu_item(&mut icons, &view);
     // Theme profile radios stay plain so stateful indicators remain visible.
     gtk_theme::append_profile_menu(&view, "win.theme");
     icons.append_submenu(

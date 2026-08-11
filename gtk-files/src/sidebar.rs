@@ -1,4 +1,4 @@
-//! Places sidebar (Home, XDG dirs, Computer, Trash, USB mounts, favorites, bookmarks, recent).
+//! Places sidebar (Home, XDG dirs, Computer, Trash, Mounted Drives, favorites, bookmarks, recent).
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -35,6 +35,7 @@ fn is_action_place(place: &Place) -> bool {
 pub struct Sidebar {
     pub root: gtk::Box,
     list: gtk::ListBox,
+    scroll: gtk::ScrolledWindow,
     /// Keeps the docked panel alive; also registered via `transfer_panel::set_active`.
     #[allow(dead_code)]
     pub transfer: Rc<crate::transfer_panel::TransferPanel>,
@@ -52,6 +53,16 @@ pub struct Sidebar {
     on_client_status: RefCell<Option<Rc<dyn Fn()>>>,
     /// Debounce Connect / Setup Sync — GTK can emit activate more than once per click.
     last_action_at: Cell<Option<Instant>>,
+    /// When true, `row_selected` must not navigate (rebuild / programmatic select).
+    suppress_activate: Cell<bool>,
+    /// Last place the window asked the sidebar to highlight (survives rebuild).
+    highlight: RefCell<Option<Place>>,
+    /// Last rendered sidebar content fingerprint (skip no-op rebuilds / flash).
+    content_fingerprint: RefCell<String>,
+    /// Coalesce VolumeMonitor chatter so we don't thrash rebuild/scroll.
+    mount_rebuild_queued: Cell<bool>,
+    /// Debounce Recent-driven rebuilds while navigating folders.
+    recent_rebuild_queued: Cell<bool>,
     /// Keep VolumeMonitor alive for mount add/remove signals.
     _volume_monitor: gio::VolumeMonitor,
 }
@@ -84,6 +95,7 @@ impl Sidebar {
         let sb = Rc::new(Self {
             root,
             list: list.clone(),
+            scroll: scroll.clone(),
             transfer,
             on_activate: RefCell::new(None),
             on_open_tab: RefCell::new(None),
@@ -95,6 +107,11 @@ impl Sidebar {
             client_busy_fingerprint: RefCell::new(String::new()),
             on_client_status: RefCell::new(None),
             last_action_at: Cell::new(None),
+            suppress_activate: Cell::new(false),
+            highlight: RefCell::new(None),
+            content_fingerprint: RefCell::new(String::new()),
+            mount_rebuild_queued: Cell::new(false),
+            recent_rebuild_queued: Cell::new(false),
             _volume_monitor: monitor.clone(),
         });
 
@@ -147,6 +164,9 @@ impl Sidebar {
         {
             let sb2 = Rc::clone(&sb);
             list.connect_row_selected(move |_, row| {
+                if sb2.suppress_activate.get() {
+                    return;
+                }
                 let Some(row) = row else {
                     return;
                 };
@@ -160,27 +180,40 @@ impl Sidebar {
             });
         }
 
-        // Refresh Devices when USB drives appear / disappear.
+        // Refresh Mounted Drives when volumes appear / disappear.
+        // Ignore mount_changed (property chatter) — it does not change the list
+        // and was flashing the whole sidebar. Debounce add/remove.
         {
             let sb2 = Rc::clone(&sb);
-            monitor.connect_mount_added(move |_, _| {
+            let queue_rebuild = Rc::new(move || {
+                if sb2.mount_rebuild_queued.get() {
+                    return;
+                }
+                sb2.mount_rebuild_queued.set(true);
                 let sb2 = Rc::clone(&sb2);
-                glib::idle_add_local_once(move || sb2.rebuild());
+                glib::timeout_add_local_once(Duration::from_millis(250), move || {
+                    sb2.mount_rebuild_queued.set(false);
+                    // Fingerprint early-out inside rebuild skips the flash when
+                    // the visible drive list did not actually change.
+                    sb2.rebuild();
+                });
             });
-        }
-        {
-            let sb2 = Rc::clone(&sb);
-            monitor.connect_mount_removed(move |_, _| {
-                let sb2 = Rc::clone(&sb2);
-                glib::idle_add_local_once(move || sb2.rebuild());
-            });
-        }
-        {
-            let sb2 = Rc::clone(&sb);
-            monitor.connect_mount_changed(move |_, _| {
-                let sb2 = Rc::clone(&sb2);
-                glib::idle_add_local_once(move || sb2.rebuild());
-            });
+            {
+                let queue_rebuild = Rc::clone(&queue_rebuild);
+                monitor.connect_mount_added(move |_, _| queue_rebuild());
+            }
+            {
+                let queue_rebuild = Rc::clone(&queue_rebuild);
+                monitor.connect_mount_removed(move |_, _| queue_rebuild());
+            }
+            {
+                let queue_rebuild = Rc::clone(&queue_rebuild);
+                monitor.connect_volume_added(move |_, _| queue_rebuild());
+            }
+            {
+                let queue_rebuild = Rc::clone(&queue_rebuild);
+                monitor.connect_volume_removed(move |_, _| queue_rebuild());
+            }
         }
 
         sb
@@ -191,6 +224,9 @@ impl Sidebar {
     }
 
     fn emit_place(&self, place: Place) {
+        if self.suppress_activate.get() {
+            return;
+        }
         if is_action_place(&place) {
             let now = Instant::now();
             if let Some(prev) = self.last_action_at.get() {
@@ -200,8 +236,61 @@ impl Sidebar {
             }
             self.last_action_at.set(Some(now));
         }
+        // User chose this place — remember it so rebuild can restore without navigating.
+        if !is_action_place(&place) {
+            *self.highlight.borrow_mut() = Some(place.clone());
+        }
         if let Some(cb) = self.on_activate.borrow().as_ref() {
             cb(place);
+        }
+    }
+
+    fn with_activate_suppressed<F: FnOnce()>(&self, f: F) {
+        let prev = self.suppress_activate.get();
+        self.suppress_activate.set(true);
+        f();
+        self.suppress_activate.set(prev);
+    }
+
+    fn select_place_quiet(&self, place: &Place) {
+        match place {
+            Place::Trash => {
+                let mut i = 0;
+                while let Some(row) = self.list.row_at_index(i) {
+                    if matches!(row_place(&row), Some(Place::Trash)) {
+                        self.list.select_row(Some(&row));
+                        return;
+                    }
+                    i += 1;
+                }
+            }
+            Place::Path(path) => {
+                let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+                let mut i = 0;
+                while let Some(row) = self.list.row_at_index(i) {
+                    if let Some(Place::Path(p)) = row_place(&row) {
+                        let pc = p.canonicalize().unwrap_or_else(|_| p.clone());
+                        if pc == canon || p == *path {
+                            self.list.select_row(Some(&row));
+                            return;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            Place::Uri(uri) => {
+                let mut i = 0;
+                while let Some(row) = self.list.row_at_index(i) {
+                    if let Some(Place::Uri(u)) = row_place(&row) {
+                        if u == *uri {
+                            self.list.select_row(Some(&row));
+                            return;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            Place::ConnectNetwork | Place::SetupSync => {}
         }
     }
 
@@ -238,8 +327,8 @@ impl Sidebar {
 
         if busy_fp != *self.client_busy_fingerprint.borrow() {
             *self.client_busy_fingerprint.borrow_mut() = busy_fp;
-            self.rebuild();
-            // Still notify so the header chip refreshes immediately.
+            // Do NOT full-rebuild here — wiping the places list every busy flip
+            // makes the sidebar flash. Header chip + file emblems still refresh.
             if let Some(cb) = self.on_client_status.borrow().as_ref() {
                 cb();
             }
@@ -255,243 +344,281 @@ impl Sidebar {
         }
     }
 
+    /// Rebuild after a short delay (folder navigation updating Recent).
+    pub fn rebuild_debounced(self: &Rc<Self>) {
+        if self.recent_rebuild_queued.get() {
+            return;
+        }
+        self.recent_rebuild_queued.set(true);
+        let sb = Rc::clone(self);
+        glib::timeout_add_local_once(Duration::from_millis(600), move || {
+            sb.recent_rebuild_queued.set(false);
+            sb.rebuild();
+        });
+    }
+
     pub fn rebuild(self: &Rc<Self>) {
-        while let Some(child) = self.list.first_child() {
-            self.list.remove(&child);
+        // Skip no-op rebuilds — destroying/recreating every row is the flash.
+        let next_fp = self.compute_content_fingerprint();
+        if next_fp == *self.content_fingerprint.borrow() {
+            // Still restore highlight without wiping widgets.
+            let restore = self.highlight.borrow().clone();
+            if let Some(place) = restore.as_ref() {
+                self.with_activate_suppressed(|| {
+                    self.select_place_quiet(place);
+                });
+            }
+            return;
         }
+        *self.content_fingerprint.borrow_mut() = next_fp;
 
-        let places_fixed: Vec<(&str, &str, Place)> = vec![
-            ("user-home-symbolic", "Home", Place::Path(home_dir())),
-            (
-                "user-desktop-symbolic",
-                "Desktop",
-                Place::Path(xdg_user_dir("DESKTOP", "Desktop")),
-            ),
-            (
-                "folder-documents-symbolic",
-                "Documents",
-                Place::Path(xdg_user_dir("DOCUMENTS", "Documents")),
-            ),
-            (
-                "folder-download-symbolic",
-                "Downloads",
-                Place::Path(xdg_user_dir("DOWNLOAD", "Downloads")),
-            ),
-            (
-                "folder-music-symbolic",
-                "Music",
-                Place::Path(xdg_user_dir("MUSIC", "Music")),
-            ),
-            (
-                "folder-pictures-symbolic",
-                "Pictures",
-                Place::Path(xdg_user_dir("PICTURES", "Pictures")),
-            ),
-            (
-                "folder-videos-symbolic",
-                "Videos",
-                Place::Path(xdg_user_dir("VIDEOS", "Videos")),
-            ),
-            (
-                "drive-harddisk-symbolic",
-                "Computer",
-                Place::Path(PathBuf::from("/")),
-            ),
-            ("user-trash-symbolic", "Trash", Place::Trash),
-        ];
+        // Browse selection mode always keeps a row selected. Rebuilding would
+        // otherwise auto-select Home and fire row_selected → navigate away from
+        // Trash / the current folder.
+        let restore = self.highlight.borrow().clone();
+        let scroll_y = self.scroll.vadjustment().value();
+        self.with_activate_suppressed(|| {
+            while let Some(child) = self.list.first_child() {
+                self.list.remove(&child);
+            }
 
-        for (icon, label, place) in places_fixed {
-            if let Place::Path(ref p) = place {
-                if *p != home_dir() && p != Path::new("/") && !p.exists() {
-                    continue;
+            let places_fixed: Vec<(&str, &str, Place)> = vec![
+                ("user-home-symbolic", "Home", Place::Path(home_dir())),
+                (
+                    "user-desktop-symbolic",
+                    "Desktop",
+                    Place::Path(xdg_user_dir("DESKTOP", "Desktop")),
+                ),
+                (
+                    "folder-documents-symbolic",
+                    "Documents",
+                    Place::Path(xdg_user_dir("DOCUMENTS", "Documents")),
+                ),
+                (
+                    "folder-download-symbolic",
+                    "Downloads",
+                    Place::Path(xdg_user_dir("DOWNLOAD", "Downloads")),
+                ),
+                (
+                    "folder-music-symbolic",
+                    "Music",
+                    Place::Path(xdg_user_dir("MUSIC", "Music")),
+                ),
+                (
+                    "folder-pictures-symbolic",
+                    "Pictures",
+                    Place::Path(xdg_user_dir("PICTURES", "Pictures")),
+                ),
+                (
+                    "folder-videos-symbolic",
+                    "Videos",
+                    Place::Path(xdg_user_dir("VIDEOS", "Videos")),
+                ),
+                (
+                    "drive-harddisk-symbolic",
+                    "Computer",
+                    Place::Path(PathBuf::from("/")),
+                ),
+                ("user-trash-symbolic", "Trash", Place::Trash),
+            ];
+
+            for (icon, label, place) in places_fixed {
+                if let Place::Path(ref p) = place {
+                    if *p != home_dir() && p != Path::new("/") && !p.exists() {
+                        continue;
+                    }
                 }
-            }
-            let row = make_row(icon, label, place.clone());
-            install_place_context_menu(&row, place, Rc::clone(self), None);
-            self.list.append(&row);
-        }
-
-        // Removable USB mounts only (skip internal NVMe / fixed disks).
-        let usb_mounts = removable_usb_mounts();
-        if !usb_mounts.is_empty() {
-            self.list.append(&make_header("Devices"));
-            for mount in usb_mounts {
-                let row = make_mount_row(&mount, Rc::clone(self));
-                self.list.append(&row);
-            }
-        }
-
-        // Network section is always shown: connect action + live mounts + ~/Network.
-        crate::network::sync_home_shortcuts();
-        let net_mounts = crate::network::network_mounts();
-        let network_home = crate::network::network_home_dir();
-        self.list.append(&make_header("Network"));
-        {
-            let place = Place::ConnectNetwork;
-            let row = make_row(
-                "network-server-symbolic",
-                "Connect to Network…",
-                place.clone(),
-            );
-            // Action row: activate only (not selectable) so one click ≠ two dialogs.
-            row.set_selectable(false);
-            self.list.append(&row);
-        }
-        if network_home.is_dir() {
-            let place = Place::Path(network_home.clone());
-            let row = make_row("network-workgroup-symbolic", "Network Home", place.clone());
-            install_place_context_menu(&row, place, Rc::clone(self), None);
-            self.list.append(&row);
-        }
-        for mount in net_mounts {
-            let row = make_network_mount_row(&mount, Rc::clone(self));
-            self.list.append(&row);
-        }
-
-        // Sync section: Active → Setup Sync (directly under it) → client folder.
-        sync_status::invalidate_sync_cache();
-        let sync = sync_setup::probe_sync_status();
-        *self.sync_fingerprint.borrow_mut() = sync.fingerprint();
-        if let Some(st) = sync_status::load_client_status() {
-            *self.client_status_fingerprint.borrow_mut() = st.fingerprint();
-            *self.client_busy_fingerprint.borrow_mut() = format!("{}", st.is_transferring());
-        } else {
-            *self.client_status_fingerprint.borrow_mut() = String::new();
-            *self.client_busy_fingerprint.borrow_mut() = String::new();
-        }
-        self.list.append(&make_header("Sync"));
-        let sync_progress = sync_setup::setup_progress();
-        if let Some(server) = sync.server.as_ref() {
-            self.list
-                .append(&make_server_status_row(&server.endpoint_label(), Rc::clone(self)));
-        } else if let Some(progress) = sync_progress
-            .as_ref()
-            .filter(|p| p.kind == sync_setup::SetupKind::Server)
-        {
-            self.list
-                .append(&make_sync_setup_pending_row(progress));
-        }
-        {
-            let place = Place::SetupSync;
-            let row = make_row_compact(
-                "list-add-symbolic",
-                "Setup Sync",
-                place,
-            );
-            row.set_selectable(false);
-            self.list.append(&row);
-        }
-        if let Some(root) = sync.client_root {
-            let name = root
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| root.display().to_string());
-            let tip = root.display().to_string();
-            let place = Place::Path(root);
-            let busy = sync_status::load_client_status()
-                .map(|s| s.is_transferring())
-                .unwrap_or(false);
-            let row = make_sync_client_row(&name, &tip, place, busy, Rc::clone(self));
-            self.list.append(&row);
-        } else if let Some(progress) = sync_progress
-            .as_ref()
-            .filter(|p| p.kind == sync_setup::SetupKind::Client)
-        {
-            self.list
-                .append(&make_sync_setup_pending_row(progress));
-        }
-
-        let data = places::load();
-
-        // Favorites
-        if !data.favorites.is_empty() {
-            self.list.append(&make_header("Favorites"));
-            for fav in &data.favorites {
-                let name = fav
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| fav.display().to_string());
-                let place = Place::Path(fav.clone());
-                let row = make_row("starred-symbolic", &name, place.clone());
-                let path = fav.clone();
-                let remove = PlaceRemove::Favorite(path);
-                install_place_context_menu(&row, place, Rc::clone(self), Some(remove));
-                self.list.append(&row);
-            }
-        }
-
-        // Bookmarks (gtk-files places.toml only)
-        let bookmarks = places::load_bookmarks();
-        if !bookmarks.is_empty() {
-            self.list.append(&make_header("Bookmarks"));
-            for bm in bookmarks {
-                let label = if bm.label.is_empty() {
-                    bm.path
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .or_else(|| bm.uri.clone())
-                        .unwrap_or_else(|| "Bookmark".into())
-                } else {
-                    bm.label.clone()
-                };
-                let place = if let Some(ref p) = bm.path {
-                    Place::Path(p.clone())
-                } else if let Some(ref uri) = bm.uri {
-                    Place::Uri(uri.clone())
-                } else {
-                    Place::Path(PathBuf::from("."))
-                };
-                let row = make_row("user-bookmarks-symbolic", &label, place.clone());
-                let remove = PlaceRemove::Bookmark {
-                    path: bm.path.clone(),
-                    uri: bm.uri.clone(),
-                };
-                install_place_context_menu(&row, place, Rc::clone(self), Some(remove));
-                self.list.append(&row);
-            }
-        }
-
-        // Recent folders
-        if !data.recent_folders.is_empty() {
-            self.list.append(&make_header("Recent"));
-            for recent in &data.recent_folders {
-                let name = recent
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| recent.display().to_string());
-                let place = Place::Path(recent.clone());
-                let row = make_row("document-open-recent-symbolic", &name, place.clone());
+                let row = make_row(icon, label, place.clone());
                 install_place_context_menu(&row, place, Rc::clone(self), None);
                 self.list.append(&row);
             }
-        }
+
+            // Mounted drives under /media (PN, MEDIA, USB, …) + unmounted volumes.
+            let mounted = user_mounted_drives();
+            let unmounted = unmounted_volumes();
+            self.list.append(&make_header("Mounted Drives"));
+            if mounted.is_empty() && unmounted.is_empty() {
+                self.list.append(&make_dim_note("No extra drives mounted"));
+            }
+            for mount in mounted {
+                let row = make_mount_row(&mount, Rc::clone(self));
+                self.list.append(&row);
+            }
+            for volume in unmounted {
+                let row = make_unmounted_volume_row(&volume, Rc::clone(self));
+                self.list.append(&row);
+            }
+
+            // Network section is always shown: connect action + live mounts + ~/Network.
+            crate::network::sync_home_shortcuts();
+            let net_mounts = crate::network::network_mounts();
+            let network_home = crate::network::network_home_dir();
+            self.list.append(&make_header("Network"));
+            {
+                let place = Place::ConnectNetwork;
+                let row = make_row(
+                    "network-server-symbolic",
+                    "Connect to Network…",
+                    place.clone(),
+                );
+                // Action row: activate only (not selectable) so one click ≠ two dialogs.
+                row.set_selectable(false);
+                self.list.append(&row);
+            }
+            if network_home.is_dir() {
+                let place = Place::Path(network_home.clone());
+                let row = make_row("network-workgroup-symbolic", "Network Home", place.clone());
+                install_place_context_menu(&row, place, Rc::clone(self), None);
+                self.list.append(&row);
+            }
+            for mount in net_mounts {
+                let row = make_network_mount_row(&mount, Rc::clone(self));
+                self.list.append(&row);
+            }
+
+            // Sync section: Active → Setup Sync (directly under it) → client folder.
+            sync_status::invalidate_sync_cache();
+            let sync = sync_setup::probe_sync_status();
+            *self.sync_fingerprint.borrow_mut() = sync.fingerprint();
+            if let Some(st) = sync_status::load_client_status() {
+                *self.client_status_fingerprint.borrow_mut() = st.fingerprint();
+                *self.client_busy_fingerprint.borrow_mut() = format!("{}", st.is_transferring());
+            } else {
+                *self.client_status_fingerprint.borrow_mut() = String::new();
+                *self.client_busy_fingerprint.borrow_mut() = String::new();
+            }
+            self.list.append(&make_header("Sync"));
+            let sync_progress = sync_setup::setup_progress();
+            if let Some(server) = sync.server.as_ref() {
+                self.list
+                    .append(&make_server_status_row(&server.endpoint_label(), Rc::clone(self)));
+            } else if let Some(progress) = sync_progress
+                .as_ref()
+                .filter(|p| p.kind == sync_setup::SetupKind::Server)
+            {
+                self.list
+                    .append(&make_sync_setup_pending_row(progress));
+            }
+            {
+                let place = Place::SetupSync;
+                let row = make_row_compact(
+                    "list-add-symbolic",
+                    "Setup Sync",
+                    place,
+                );
+                row.set_selectable(false);
+                self.list.append(&row);
+            }
+            if let Some(root) = sync.client_root {
+                let name = root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| root.display().to_string());
+                let tip = root.display().to_string();
+                let place = Place::Path(root);
+                let busy = sync_status::load_client_status()
+                    .map(|s| s.is_transferring())
+                    .unwrap_or(false);
+                let row = make_sync_client_row(&name, &tip, place, busy, Rc::clone(self));
+                self.list.append(&row);
+            } else if let Some(progress) = sync_progress
+                .as_ref()
+                .filter(|p| p.kind == sync_setup::SetupKind::Client)
+            {
+                self.list
+                    .append(&make_sync_setup_pending_row(progress));
+            }
+
+            let data = places::load();
+
+            // Favorites
+            if !data.favorites.is_empty() {
+                self.list.append(&make_header("Favorites"));
+                for fav in &data.favorites {
+                    let name = fav
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| fav.display().to_string());
+                    let place = Place::Path(fav.clone());
+                    let row = make_row("starred-symbolic", &name, place.clone());
+                    let path = fav.clone();
+                    let remove = PlaceRemove::Favorite(path);
+                    install_place_context_menu(&row, place, Rc::clone(self), Some(remove));
+                    self.list.append(&row);
+                }
+            }
+
+            // Bookmarks (gtk-files places.toml only)
+            let bookmarks = places::load_bookmarks();
+            if !bookmarks.is_empty() {
+                self.list.append(&make_header("Bookmarks"));
+                for bm in bookmarks {
+                    let label = if bm.label.is_empty() {
+                        bm.path
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .or_else(|| bm.uri.clone())
+                            .unwrap_or_else(|| "Bookmark".into())
+                    } else {
+                        bm.label.clone()
+                    };
+                    let place = if let Some(ref p) = bm.path {
+                        Place::Path(p.clone())
+                    } else if let Some(ref uri) = bm.uri {
+                        Place::Uri(uri.clone())
+                    } else {
+                        Place::Path(PathBuf::from("."))
+                    };
+                    let row = make_row("user-bookmarks-symbolic", &label, place.clone());
+                    let remove = PlaceRemove::Bookmark {
+                        path: bm.path.clone(),
+                        uri: bm.uri.clone(),
+                    };
+                    install_place_context_menu(&row, place, Rc::clone(self), Some(remove));
+                    self.list.append(&row);
+                }
+            }
+
+            // Recent folders
+            if !data.recent_folders.is_empty() {
+                self.list.append(&make_header("Recent"));
+                for recent in &data.recent_folders {
+                    let name = recent
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| recent.display().to_string());
+                    let place = Place::Path(recent.clone());
+                    let row = make_row("document-open-recent-symbolic", &name, place.clone());
+                    install_place_context_menu(&row, place, Rc::clone(self), None);
+                    self.list.append(&row);
+                }
+            }
+
+            if let Some(place) = restore.as_ref() {
+                self.select_place_quiet(place);
+            }
+        });
+        // Restore scroll after layout so Trash / deep places stay in view.
+        let adj = self.scroll.vadjustment();
+        let restore_y = scroll_y;
+        glib::idle_add_local_once(move || {
+            let upper = adj.upper() - adj.page_size();
+            adj.set_value(restore_y.clamp(0.0, upper.max(0.0)));
+        });
     }
 
     pub fn select_path(&self, path: &Path) {
-        let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let mut i = 0;
-        while let Some(row) = self.list.row_at_index(i) {
-            if let Some(Place::Path(p)) = row_place(&row) {
-                let pc = p.canonicalize().unwrap_or_else(|_| p.clone());
-                if pc == canon || p == path {
-                    self.list.select_row(Some(&row));
-                    return;
-                }
-            }
-            i += 1;
-        }
-        self.list.unselect_all();
+        *self.highlight.borrow_mut() = Some(Place::Path(path.to_path_buf()));
+        self.with_activate_suppressed(|| {
+            self.select_place_quiet(&Place::Path(path.to_path_buf()));
+        });
     }
 
     pub fn select_trash(&self) {
-        let mut i = 0;
-        while let Some(row) = self.list.row_at_index(i) {
-            if matches!(row_place(&row), Some(Place::Trash)) {
-                self.list.select_row(Some(&row));
-                return;
-            }
-            i += 1;
-        }
+        *self.highlight.borrow_mut() = Some(Place::Trash);
+        self.with_activate_suppressed(|| {
+            self.select_place_quiet(&Place::Trash);
+        });
     }
 
     /// Rebuild sidebar if gtk-sync server/client status changed.
@@ -519,86 +646,189 @@ impl Sidebar {
             });
         }
     }
+
+    /// Stable snapshot of everything the sidebar draws. Used to skip no-op rebuilds.
+    fn compute_content_fingerprint(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+
+        for (_, label, place) in [
+            ("", "Home", Place::Path(home_dir())),
+            ("", "Desktop", Place::Path(xdg_user_dir("DESKTOP", "Desktop"))),
+            (
+                "",
+                "Documents",
+                Place::Path(xdg_user_dir("DOCUMENTS", "Documents")),
+            ),
+            (
+                "",
+                "Downloads",
+                Place::Path(xdg_user_dir("DOWNLOAD", "Downloads")),
+            ),
+            ("", "Music", Place::Path(xdg_user_dir("MUSIC", "Music"))),
+            (
+                "",
+                "Pictures",
+                Place::Path(xdg_user_dir("PICTURES", "Pictures")),
+            ),
+            ("", "Videos", Place::Path(xdg_user_dir("VIDEOS", "Videos"))),
+            ("", "Computer", Place::Path(PathBuf::from("/"))),
+            ("", "Trash", Place::Trash),
+        ] {
+            match &place {
+                Place::Path(p) => {
+                    if *p == home_dir() || p == Path::new("/") || p.exists() {
+                        parts.push(format!("p:{label}:{}", p.display()));
+                    }
+                }
+                Place::Trash => parts.push("p:Trash".into()),
+                _ => {}
+            }
+        }
+
+        for mount in user_mounted_drives() {
+            let path = mount
+                .root()
+                .path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| mount.root().uri().to_string());
+            parts.push(format!("d:{}:{path}", mount.name()));
+        }
+        for vol in unmounted_volumes() {
+            parts.push(format!("u:{}", vol.name()));
+        }
+
+        crate::network::sync_home_shortcuts();
+        for mount in crate::network::network_mounts() {
+            parts.push(format!("n:{}:{}", mount.name(), mount.root().uri()));
+        }
+        let network_home = crate::network::network_home_dir();
+        if network_home.is_dir() {
+            parts.push(format!("nh:{}", network_home.display()));
+        }
+
+        let sync = sync_setup::probe_sync_status();
+        parts.push(format!("s:{}", sync.fingerprint()));
+        if let Some(progress) = sync_setup::setup_progress() {
+            parts.push(format!(
+                "sp:{:?}:{}:{}",
+                progress.kind, progress.running, progress.detail
+            ));
+        }
+        let busy = sync_status::load_client_status()
+            .map(|s| s.is_transferring())
+            .unwrap_or(false);
+        parts.push(format!("sb:{busy}"));
+
+        let data = places::load();
+        for fav in &data.favorites {
+            parts.push(format!("f:{}", fav.display()));
+        }
+        for bm in places::load_bookmarks() {
+            parts.push(format!(
+                "b:{}:{}:{}",
+                bm.label,
+                bm.path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+                bm.uri.clone().unwrap_or_default()
+            ));
+        }
+        for recent in &data.recent_folders {
+            parts.push(format!("r:{}", recent.display()));
+        }
+
+        parts.join("\n")
+    }
 }
 
-/// Mounted removable USB volumes suitable for the Devices sidebar section.
-fn removable_usb_mounts() -> Vec<gio::Mount> {
+/// User-facing mounts for the Mounted Drives sidebar section.
+/// Includes `/media` / `/run/media` volumes (PN, MEDIA, USB sticks, …) and
+/// classic removable drives — not the root FS, boot, or snap mounts.
+fn user_mounted_drives() -> Vec<gio::Mount> {
     let monitor = gio::VolumeMonitor::get();
     let mut mounts: Vec<gio::Mount> = monitor
         .mounts()
         .into_iter()
-        .filter(is_removable_usb_mount)
+        .filter(is_user_mounted_drive)
         .collect();
     mounts.sort_by(|a, b| {
         a.name()
             .to_ascii_lowercase()
             .cmp(&b.name().to_ascii_lowercase())
+            .then_with(|| {
+                let pa = a.root().path().unwrap_or_default();
+                let pb = b.root().path().unwrap_or_default();
+                pa.cmp(&pb)
+            })
     });
     mounts
 }
 
-fn is_removable_usb_mount(mount: &gio::Mount) -> bool {
-    // Never list shadow / system mounts.
+fn is_user_mounted_drive(mount: &gio::Mount) -> bool {
     let root = mount.root();
-    if let Some(path) = root.path() {
-        let s = path.to_string_lossy();
-        if s == "/" || s.starts_with("/boot") || s.starts_with("/snap") {
-            return false;
-        }
-        // Internal NVMe partitions often appear under /media — exclude by device.
-        if unix_device_looks_internal(&path) {
-            return false;
-        }
-    }
-
-    if let Some(drive) = mount.drive() {
-        if drive_looks_internal(&drive) {
-            return false;
-        }
-        // USB / SD / optical / other removable media.
-        return drive.is_removable() || drive.can_eject() || mount.can_eject();
-    }
-
-    // No Drive object: only accept classic removable automount locations,
-    // and only when the volume can be ejected/unmounted.
     let Some(path) = root.path() else {
         return false;
     };
     let s = path.to_string_lossy();
-    let under_media = s.starts_with("/media/") || s.starts_with("/run/media/");
-    under_media && (mount.can_eject() || mount.can_unmount()) && !unix_device_looks_internal(&path)
+    if s == "/" || s.starts_with("/boot") || s.starts_with("/snap") || s.starts_with("/var/") {
+        return false;
+    }
+
+    // Anything under the classic automount roots is a "mounted drive" the
+    // user expects to browse / eject — including NVMe partitions at /media.
+    if s.starts_with("/media/") || s.starts_with("/run/media/") {
+        return mount.can_eject() || mount.can_unmount() || path.is_dir();
+    }
+
+    if let Some(drive) = mount.drive() {
+        if drive.is_removable() || drive.can_eject() || mount.can_eject() {
+            return !drive_looks_system_root(&drive);
+        }
+    }
+
+    false
 }
 
-fn drive_looks_internal(drive: &gio::Drive) -> bool {
+fn drive_looks_system_root(drive: &gio::Drive) -> bool {
+    // Keep the OS root disk out of Mounted Drives when its only mount is `/`.
     let id = drive
         .identifier("unix-device")
         .unwrap_or_default()
         .to_ascii_lowercase();
-    id.contains("nvme")
-        || (id.contains("mmcblk") && !drive.is_removable())
-        || (!drive.is_removable() && !drive.can_eject() && !id.is_empty() && !id.contains("usb"))
+    id.is_empty()
 }
 
-fn unix_device_looks_internal(mount_path: &Path) -> bool {
-    // Resolve SOURCE from /proc/mounts for this mount point.
-    let Ok(text) = std::fs::read_to_string("/proc/mounts") else {
-        return false;
-    };
-    let target = mount_path.to_string_lossy();
-    for line in text.lines() {
-        let mut parts = line.split_whitespace();
-        let Some(source) = parts.next() else {
-            continue;
-        };
-        let Some(dest) = parts.next() else {
-            continue;
-        };
-        if dest == target.as_ref() {
-            let src = source.to_ascii_lowercase();
-            return src.contains("nvme");
-        }
-    }
-    false
+/// Volumes that exist but are not currently mounted (show with a Mount button).
+fn unmounted_volumes() -> Vec<gio::Volume> {
+    let monitor = gio::VolumeMonitor::get();
+    let mut vols: Vec<gio::Volume> = monitor
+        .volumes()
+        .into_iter()
+        .filter(|v| v.get_mount().is_none() && v.can_mount())
+        .collect();
+    vols.sort_by(|a, b| {
+        a.name()
+            .to_ascii_lowercase()
+            .cmp(&b.name().to_ascii_lowercase())
+    });
+    vols
+}
+
+fn make_dim_note(text: &str) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    row.set_selectable(false);
+    row.set_activatable(false);
+    let label = gtk::Label::new(Some(text));
+    label.set_xalign(0.0);
+    label.add_css_class("dim-label");
+    label.add_css_class("caption");
+    label.set_margin_start(16);
+    label.set_margin_end(8);
+    label.set_margin_top(2);
+    label.set_margin_bottom(4);
+    row.set_child(Some(&label));
+    row
 }
 
 fn make_header(text: &str) -> gtk::ListBoxRow {
@@ -830,6 +1060,64 @@ fn make_mount_row(mount: &gio::Mount, sidebar: Rc<Sidebar>) -> gtk::ListBoxRow {
     make_mount_row_with_icon(mount, sidebar, &mount_icon_name(mount))
 }
 
+fn make_unmounted_volume_row(volume: &gio::Volume, sidebar: Rc<Sidebar>) -> gtk::ListBoxRow {
+    let name = volume.name().to_string();
+    let row = gtk::ListBoxRow::new();
+    row.set_selectable(false);
+    row.set_activatable(false);
+
+    let box_ = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    box_.set_margin_start(8);
+    box_.set_margin_end(4);
+    box_.set_margin_top(2);
+    box_.set_margin_bottom(2);
+
+    let image = gtk::Image::from_icon_name("drive-harddisk-symbolic");
+    image.add_css_class("dim-label");
+    let lbl = gtk::Label::new(Some(&name));
+    lbl.set_xalign(0.0);
+    lbl.set_hexpand(true);
+    lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    lbl.add_css_class("dim-label");
+    lbl.set_tooltip_text(Some("Not mounted"));
+    box_.append(&image);
+    box_.append(&lbl);
+
+    let mount_btn = gtk::Button::from_icon_name("media-playback-start-symbolic");
+    mount_btn.add_css_class("flat");
+    mount_btn.add_css_class("circular");
+    mount_btn.set_tooltip_text(Some("Mount"));
+    mount_btn.set_valign(gtk::Align::Center);
+    mount_btn.set_focus_on_click(false);
+    let volume = volume.clone();
+    let sidebar = Rc::clone(&sidebar);
+    mount_btn.connect_clicked(move |_| {
+        mount_volume(&volume, Rc::clone(&sidebar));
+    });
+    box_.append(&mount_btn);
+
+    row.set_child(Some(&box_));
+    row.set_widget_name("unmounted-volume");
+    row
+}
+
+fn mount_volume(volume: &gio::Volume, sidebar: Rc<Sidebar>) {
+    let volume = volume.clone();
+    let op = gtk::MountOperation::new(None::<&gtk::Window>);
+    volume.mount(
+        gio::MountMountFlags::NONE,
+        Some(&op),
+        None::<&gio::Cancellable>,
+        move |res| {
+            if let Err(e) = res {
+                eprintln!("gtk-files: mount failed: {e}");
+            }
+            // VolumeMonitor signals also rebuild; this covers quiet failures.
+            sidebar.rebuild();
+        },
+    );
+}
+
 fn make_network_mount_row(mount: &gio::Mount, sidebar: Rc<Sidebar>) -> gtk::ListBoxRow {
     make_mount_row_with_icon(mount, sidebar, crate::network::network_mount_icon(mount))
 }
@@ -858,6 +1146,9 @@ fn make_mount_row_with_icon(
     lbl.set_xalign(0.0);
     lbl.set_hexpand(true);
     lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    if let Some(path) = root.path() {
+        lbl.set_tooltip_text(Some(&path.display().to_string()));
+    }
     box_.append(&image);
     box_.append(&lbl);
 
@@ -866,7 +1157,7 @@ fn make_mount_row_with_icon(
         let eject = gtk::Button::from_icon_name("media-eject-symbolic");
         eject.add_css_class("flat");
         eject.add_css_class("circular");
-        eject.set_tooltip_text(Some("Disconnect"));
+        eject.set_tooltip_text(Some("Eject / Unmount"));
         eject.set_valign(gtk::Align::Center);
         eject.set_focus_on_click(false);
         let mount = mount.clone();

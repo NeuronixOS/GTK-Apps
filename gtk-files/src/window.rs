@@ -47,6 +47,8 @@ pub struct FilesWindow {
     find_page: u32,
     back_btn: gtk::Button,
     forward_btn: gtk::Button,
+    /// Visible only while browsing `trash:///`.
+    empty_trash_btn: gtk::Button,
     /// Horizontal: Places sidebar | (files + bottom tools)
     paned: gtk::Paned,
     /// Vertical: file view | bottom tools (terminal / find in files)
@@ -107,6 +109,10 @@ impl FilesWindow {
         view_btn.set_tooltip_text(Some("Toggle list/grid view"));
         let new_folder_btn = gtk::Button::from_icon_name("folder-new-symbolic");
         new_folder_btn.set_tooltip_text(Some("New folder"));
+        let empty_trash_btn = gtk::Button::with_label("Empty Trash");
+        empty_trash_btn.set_tooltip_text(Some("Permanently delete all items in the Trash"));
+        empty_trash_btn.add_css_class("destructive-action");
+        empty_trash_btn.set_visible(false);
 
         let sync_header_icon = gtk::Image::from_icon_name("view-refresh-symbolic");
         sync_header_icon.set_pixel_size(16);
@@ -138,12 +144,20 @@ impl FilesWindow {
             .build();
         app_icons.bind_menu_button(&menu_btn);
 
+        // pack_end order: first = rightmost. Drive sits immediately left of the
+        // hamburger so the sync chip (further left) can show/hide without
+        // shoving the AI button around.
+        let fw_slot: Rc<RefCell<Option<Rc<FilesWindow>>>> = Rc::new(RefCell::new(None));
+        let driving = crate::neuron::make_driving_mode(&fw_slot);
         header.pack_end(&menu_btn);
+        header.pack_end(&driving.button);
         header.pack_end(&view_btn);
         header.pack_end(&new_folder_btn);
         header.pack_end(&search_btn);
         // Fixed-width chip immediately left of the magnifying-glass.
         header.pack_end(&sync_header);
+        // Pack after sync chip so it sits just left of search when Trash is open.
+        header.pack_end(&empty_trash_btn);
         window.set_titlebar(Some(&header));
 
         let sidebar = Sidebar::new();
@@ -198,10 +212,12 @@ impl FilesWindow {
         paned.set_shrink_start_child(false);
         paned.set_position(cfg.window.sidebar_width);
 
-        window.set_child(Some(&paned));
+        let shell = gtk_neuron::wrap_with_driving_panel(&paned, &driving.panel);
+        driving.bind_paned(&shell);
+        driving.install_window_action(&window);
+        window.set_child(Some(&shell));
 
-        // Callbacks filled once `fw` exists (see `fw_slot` below).
-        let fw_slot: Rc<RefCell<Option<Rc<FilesWindow>>>> = Rc::new(RefCell::new(None));
+        // Callbacks filled once `fw` exists (see `fw_slot` above — created with header).
         let on_reveal = {
             let slot = Rc::clone(&fw_slot);
             Rc::new(move |path: PathBuf| {
@@ -245,6 +261,7 @@ impl FilesWindow {
             find_page,
             back_btn: back_btn.clone(),
             forward_btn: forward_btn.clone(),
+            empty_trash_btn: empty_trash_btn.clone(),
             paned: paned.clone(),
             content_paned: content_paned.clone(),
             context_paths: RefCell::new(None),
@@ -254,6 +271,13 @@ impl FilesWindow {
         });
         *fw_slot.borrow_mut() = Some(Rc::clone(&fw));
         fw.update_sync_header();
+        {
+            let fw2 = Rc::clone(&fw);
+            empty_trash_btn.connect_clicked(move |_| {
+                let tab = fw2.current_tab();
+                file_ops::empty_trash(Some(&fw2.window), move || tab.refresh());
+            });
+        }
 
         // Place the divider so the bottom tools keep their configured height.
         {
@@ -504,6 +528,7 @@ impl FilesWindow {
             let window = self.window.clone();
             let terminal = Rc::clone(&self.terminal);
             let tab_ref = Rc::clone(&tab);
+            let fw = Rc::clone(self);
             tab.set_on_location(move |file| {
                 let name = util::title_for_location(&file);
                 title.set_text(&name);
@@ -513,7 +538,7 @@ impl FilesWindow {
                     pathbar.set_location(Path::new("trash:///"));
                 } else if let Some(p) = file.path() {
                     if places::record_recent_folder(&p) {
-                        sidebar.rebuild();
+                        sidebar.rebuild_debounced();
                     }
                     sidebar.select_path(&p);
                     pathbar.set_location(&p);
@@ -521,6 +546,7 @@ impl FilesWindow {
                 }
                 back.set_sensitive(tab_ref.can_back());
                 forward.set_sensitive(tab_ref.can_forward());
+                fw.update_trash_chrome(util::is_trash_location(&file));
             });
         }
 
@@ -594,7 +620,23 @@ impl FilesWindow {
         }
         self.back_btn.set_sensitive(tab.can_back());
         self.forward_btn.set_sensitive(tab.can_forward());
+        self.update_trash_chrome(util::is_trash_location(&file));
         self.update_sync_header();
+    }
+
+    pub fn tab_count(&self) -> usize {
+        self.tabs.borrow().len()
+    }
+
+    fn update_trash_chrome(&self, in_trash: bool) {
+        self.empty_trash_btn.set_visible(in_trash);
+        // New Folder does not apply inside trash:///.
+        // Look up via titlebar children is awkward; toggle via action sensitivity instead.
+        if let Some(action) = self.window.lookup_action("new-folder") {
+            action
+                .downcast_ref::<gio::SimpleAction>()
+                .map(|a| a.set_enabled(!in_trash));
+        }
     }
 
     /// Update the header-bar sync chip (fixed on the right of the path bar).
@@ -691,7 +733,12 @@ impl FilesWindow {
     }
 
     fn open_path_in_new_tab(self: &Rc<Self>, path: &Path) {
-        if !path.exists() && path.to_string_lossy() != "trash:///" {
+        if util::is_trash_path(path) {
+            self.add_tab(Some(util::trash_file()));
+            self.sync_chrome();
+            return;
+        }
+        if !path.exists() {
             return;
         }
         self.add_tab(Some(gio::File::for_path(path)));
@@ -699,7 +746,17 @@ impl FilesWindow {
     }
 
     fn open_path_in_new_window(&self, path: &Path) {
-        if !path.exists() && path.to_string_lossy() != "trash:///" {
+        if util::is_trash_path(path) {
+            let Some(app) = self.window.application() else {
+                return;
+            };
+            let new = FilesWindow::new(&app, Rc::clone(&self.config), Rc::clone(&self.clipboard));
+            new.current_tab().navigate(util::trash_file(), true);
+            new.sync_chrome();
+            new.present();
+            return;
+        }
+        if !path.exists() {
             return;
         }
         let Some(app) = self.window.application() else {
@@ -939,7 +996,7 @@ impl FilesWindow {
             }
         }
         if rebuilt {
-            self.sidebar.rebuild();
+            self.sidebar.rebuild_debounced();
         }
     }
 
@@ -1285,7 +1342,7 @@ impl FilesWindow {
                 );
                 return;
             }
-            file_ops::drop_into(Some(&window2), &dest, &paths, false, move || {
+            file_ops::drop_into(Some(&window2), &dest, &paths, false, false, move || {
                 refresh_tab.refresh();
             });
         });
@@ -1348,7 +1405,7 @@ impl FilesWindow {
                 };
                 if let Some(p) = file.path() {
                     if places::record_recent_folder(&p) {
-                        sidebar.rebuild();
+                        sidebar.rebuild_debounced();
                     }
                     sidebar.select_path(&p);
                 }
@@ -1388,7 +1445,7 @@ impl FilesWindow {
             util::open_file_default(Some(&self.window), &gio::File::for_path(f));
         }
         if rebuilt {
-            self.sidebar.rebuild();
+            self.sidebar.rebuild_debounced();
         }
     }
 
@@ -1405,7 +1462,7 @@ impl FilesWindow {
         }
         if let Some(p) = file.path() {
             if places::record_recent_for_file(&p) {
-                self.sidebar.rebuild();
+                self.sidebar.rebuild_debounced();
             }
         }
         util::open_file_default(Some(&self.window), &file);
@@ -1931,6 +1988,7 @@ fn build_app_menu() -> (gio::Menu, gtk_theme::IconMenu) {
     icons.append_action(&file, "New Document", "win.new-file");
     icons.append_action(&file, "Open Folder…", "win.open-folder");
     icons.append_action(&file, "Open With...", "win.open-with");
+    icons.append_action(&file, "Empty Trash…", "win.empty-trash");
     icons.append_action(&file, "Close Tab", "win.close-tab");
     menu.append_submenu(Some("_File"), &file);
 
@@ -1973,6 +2031,7 @@ fn build_app_menu() -> (gio::Menu, gtk_theme::IconMenu) {
     sort.append(Some("By Type"), Some("win.sort-type"));
     sort.append(Some("By Modified"), Some("win.sort-modified"));
     icons.append_submenu(&view, "Sort", &sort, "view-sort-ascending-symbolic");
+    gtk_neuron::append_driving_menu_item(&mut icons, &view);
     gtk_theme::append_profile_menu(&view, "win.theme");
     menu.append_submenu(Some("_View"), &view);
 
@@ -2099,7 +2158,9 @@ fn show_context_menu(
         icons.append_action(&menu, "Paste", "win.paste");
         icons.append_action(&menu, "Select All", "win.select-all");
         icons.append_action(&menu, "Properties", "win.properties");
-        icons.append_action(&menu, "Empty Trash...", "win.empty-trash");
+        if fw.current_tab().is_trash() {
+            icons.append_action(&menu, "Empty Trash...", "win.empty-trash");
+        }
         if fw
             .current_tab()
             .location_path()

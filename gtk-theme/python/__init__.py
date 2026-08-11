@@ -13,6 +13,7 @@ from .gtk_theme import (  # noqa: F401
     builtin_profiles,
     chrome_css,
     default_profile,
+    ensure_neuron_daemon,
     install_about_action,
     install_open_theme_editor_action,
     integrate_profile_menu,
@@ -26,5 +27,8 @@ from .gtk_theme import (  # noqa: F401
     select_theme,
     show_about_dialog,
     sourceview_scheme_candidates,
+    sync_hyprbars,
+    sync_desktop_theme,
+    sync_shell_chrome,
     watch_theme,
 )

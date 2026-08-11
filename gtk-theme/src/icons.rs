@@ -354,6 +354,7 @@ pub fn icon_for_action(action: &str) -> &'static str {
         "zoom-fit" | "fit" | "zoom-original" | "zoom-reset" => "zoom-fit-best-symbolic",
         "fullscreen" | "view-fullscreen" => "view-fullscreen-symbolic",
         "sidebar" | "toggle-sidebar" => "view-sidebar-start-symbolic",
+        "driving-mode" => "neuron-drive-symbolic",
 
         // Sort / thumbs
         "sort-name" | "sort-size" | "sort-type" | "sort-modified" => "view-sort-ascending-symbolic",

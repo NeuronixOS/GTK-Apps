@@ -11,6 +11,7 @@
 mod config;
 mod image_list;
 mod image_view;
+mod neuron;
 mod window;
 
 use std::cell::RefCell;

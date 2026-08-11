@@ -244,15 +244,27 @@ impl TerminalState {
     fn spawn_shell(self: &Rc<Self>) {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
         let dir = self.cwd.borrow().to_string_lossy().into_owned();
-        let argv = [shell.as_str()];
-        let envv: &[&str] = &[];
+        let is_zsh = shell.rsplit('/').next().is_some_and(|n| n == "zsh");
+        let argv: Vec<String> = if is_zsh {
+            vec![shell, "-o".into(), "HIST_IGNORE_SPACE".into(), "-i".into()]
+        } else {
+            vec![shell]
+        };
+        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+
+        let mut env_owned: Vec<String> = std::env::vars()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        patch_histcontrol(&mut env_owned);
+        let env_refs: Vec<&str> = env_owned.iter().map(String::as_str).collect();
+
         let weak = Rc::downgrade(self);
 
         self.terminal.spawn_async(
             vte4::PtyFlags::DEFAULT,
             Some(dir.as_str()),
-            &argv,
-            envv,
+            &argv_refs,
+            &env_refs,
             glib::SpawnFlags::DEFAULT,
             || {},
             -1,
@@ -492,10 +504,27 @@ fn install_terminal_clipboard(terminal: &vte4::Terminal) {
     terminal.add_controller(gesture);
 }
 
+fn patch_histcontrol(env: &mut Vec<String>) {
+    const KEY: &str = "HISTCONTROL=";
+    if let Some(entry) = env.iter_mut().find(|e| e.starts_with(KEY)) {
+        let val = &entry[KEY.len()..];
+        if !val.split(':').any(|p| p == "ignorespace" || p == "ignoreboth") {
+            *entry = if val.is_empty() {
+                format!("{KEY}ignorespace")
+            } else {
+                format!("{entry}:ignorespace")
+            };
+        }
+    } else {
+        env.push(format!("{KEY}ignorespace"));
+    }
+}
+
 fn feed_cd(terminal: &vte4::Terminal, path: &Path) {
     let escaped = shell_single_quote(&path.to_string_lossy());
-    // Match gtk-files: Ctrl-U clear line, cd, Ctrl-L clear screen.
-    let cmd = format!("\u{15}cd {escaped}\n\u{0c}");
+    // Leading space + HISTCONTROL/ignorespace (bash) or HIST_IGNORE_SPACE (zsh)
+    // keeps tab/folder-navigation cds out of the user's shell history.
+    let cmd = format!("\u{15} cd -- {escaped}\n\u{0c}");
     terminal.feed_child(cmd.as_bytes());
 }
 

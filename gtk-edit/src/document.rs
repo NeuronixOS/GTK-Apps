@@ -1,6 +1,6 @@
 //! Document state wrapping a GtkSource Buffer.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -34,6 +34,10 @@ pub struct Document {
     pub encoding: RefCell<String>,
     pub newline: RefCell<NewlineType>,
     pub mtime: RefCell<Option<std::time::SystemTime>>,
+    /// Disk mtime the user already chose to Ignore (or we prompted for).
+    pub ignored_disk_mtime: RefCell<Option<std::time::SystemTime>>,
+    /// True while a "file changed on disk" dialog is open for this document.
+    pub disk_change_prompt_open: Cell<bool>,
     pub readonly: RefCell<bool>,
     cursor_line: RefCell<i32>,
     cursor_column: RefCell<i32>,
@@ -52,6 +56,8 @@ impl Document {
             encoding: RefCell::new("UTF-8".into()),
             newline: RefCell::new(NewlineType::Lf),
             mtime: RefCell::new(None),
+            ignored_disk_mtime: RefCell::new(None),
+            disk_change_prompt_open: Cell::new(false),
             readonly: RefCell::new(false),
             cursor_line: RefCell::new(0),
             cursor_column: RefCell::new(0),

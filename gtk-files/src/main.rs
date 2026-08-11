@@ -6,6 +6,7 @@ mod dnd;
 mod file_ops;
 mod find_in_files;
 mod network;
+mod neuron;
 mod open_with;
 mod pathbar;
 mod places;
@@ -25,7 +26,6 @@ mod util;
 mod window;
 
 use std::cell::RefCell;
-use std::path::PathBuf;
 use std::rc::Rc;
 
 use gtk4 as gtk;
@@ -68,7 +68,7 @@ fn main() -> glib::ExitCode {
     });
 
     app.connect_command_line(|app, cmdline| {
-        let (new_window, paths) = parse_command_line(cmdline);
+        let (new_window, files) = parse_command_line(cmdline);
 
         let fw = if new_window {
             open_new_window(app)
@@ -76,8 +76,7 @@ fn main() -> glib::ExitCode {
             ensure_window(app)
         };
 
-        if !paths.is_empty() {
-            let files: Vec<gio::File> = paths.iter().map(gio::File::for_path).collect();
+        if !files.is_empty() {
             open_locations(&fw, &files);
         }
         fw.present();
@@ -131,23 +130,38 @@ fn open_new_window(app: &gtk::Application) -> Rc<FilesWindow> {
 }
 
 fn open_locations(fw: &Rc<FilesWindow>, files: &[gio::File]) {
+    let mut reuse_initial = fw.tab_count() == 1;
     for file in files {
-        if let Some(path) = file.path() {
+        let target = if util::is_trash_location(file) {
+            util::trash_file()
+        } else if let Some(path) = file.path() {
             if path.is_dir() {
-                fw.add_tab(Some(gio::File::for_path(&path)));
+                gio::File::for_path(&path)
             } else if let Some(parent) = path.parent() {
-                fw.add_tab(Some(gio::File::for_path(parent)));
+                gio::File::for_path(parent)
+            } else {
+                continue;
             }
         } else {
-            // Remote / URI location
-            fw.add_tab(Some(file.clone()));
+            // Remote / special URI (sftp://, …).
+            file.clone()
+        };
+
+        if reuse_initial {
+            // Replace the default Home tab instead of stacking another beside it.
+            fw.current_tab().navigate(target, true);
+            fw.sync_chrome();
+            reuse_initial = false;
+        } else {
+            fw.add_tab(Some(target));
         }
     }
 }
 
-fn parse_command_line(cmdline: &gio::ApplicationCommandLine) -> (bool, Vec<PathBuf>) {
+fn parse_command_line(cmdline: &gio::ApplicationCommandLine) -> (bool, Vec<gio::File>) {
     let mut new_window = false;
-    let mut paths = Vec::new();
+    let mut files = Vec::new();
+    let cwd = cmdline.cwd();
     for a in cmdline.arguments().into_iter().skip(1) {
         let s = a.to_string_lossy();
         if s.is_empty() || s.starts_with('-') {
@@ -157,19 +171,10 @@ fn parse_command_line(cmdline: &gio::ApplicationCommandLine) -> (bool, Vec<PathB
             new_window = true;
             continue;
         }
-        let path = PathBuf::from(s.as_ref());
-        // Resolve relative to the invoking process cwd (remote launches).
-        let path = if path.is_absolute() {
-            path
-        } else {
-            cmdline
-                .cwd()
-                .map(|cwd| cwd.join(&path))
-                .unwrap_or(path)
-        };
-        paths.push(path);
+        // for_commandline_arg understands trash:/// and other URIs; for_path does not.
+        files.push(util::location_from_open_arg(&a, cwd.as_deref()));
     }
-    (new_window, paths)
+    (new_window, files)
 }
 
 thread_local! {

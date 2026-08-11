@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -608,7 +609,15 @@ def select_theme(
     if on_profile:
         on_profile(profile)
     _broadcast(profile, from_file=False)
+    sync_desktop_theme(profile)
+
+
+def sync_desktop_theme(profile: Optional[Profile] = None) -> bool:
+    """Force-reset hyprbars + Waybar / mako / fuzzel / system GTK dialog colors."""
+    profile = profile or load_profile()
     sync_hyprbars(profile)
+    sync_shell_chrome(profile)
+    return True
 
 
 def sync_hyprbars(profile: Optional[Profile] = None) -> bool:
@@ -649,12 +658,13 @@ def sync_hyprbars_colors(bar_hex: str, text_hex: str) -> bool:
                     pass
 
     # 2) Live update: keywords take effect immediately for bar/title/inactive fill.
-    _hyprctl_keyword("plugin:hyprbars:bar_color", bar_rgba)
-    _hyprctl_keyword("plugin:hyprbars:col.text", text_rgb)
-    _hyprctl_keyword("plugin:hyprbars:inactive_button_color", bar_rgb)
-
-    # 3) Rebuild − □ × buttons from the rewritten hyprbars-button lines.
-    _hyprctl_reload()
+    #    Skip during session start — conf write is enough; hyprctl can race plugins.
+    if not _theme_session_safe():
+        _hyprctl_keyword("plugin:hyprbars:bar_color", bar_rgba)
+        _hyprctl_keyword("plugin:hyprbars:col.text", text_rgb)
+        _hyprctl_keyword("plugin:hyprbars:inactive_button_color", bar_rgb)
+        # 3) Rebuild − □ × buttons from the rewritten hyprbars-button lines.
+        _hyprctl_reload()
     return True
 
 
@@ -759,7 +769,16 @@ def _hyprctl_keyword(key: str, value: str) -> None:
         pass
 
 
+def _theme_session_safe() -> bool:
+    """True during Hyprland session bring-up — avoid reload / process thrash."""
+    return bool(os.environ.get("NEURONIX_THEME_NO_HYPR_RELOAD"))
+
+
 def _hyprctl_reload() -> None:
+    # Session start sets NEURONIX_THEME_NO_HYPR_RELOAD so we never `hyprctl reload`
+    # while plugins/portals are still coming up (that freezes Hyprland on re-login).
+    if _theme_session_safe():
+        return
     if not shutil.which("hyprctl"):
         return
     try:
@@ -776,8 +795,856 @@ def _hyprctl_reload() -> None:
         pass
 
 
+def sync_shell_chrome(profile: Optional[Profile] = None) -> bool:
+    """Restyle Waybar / mako / fuzzel / Hyprland / system GTK dialogs to the profile."""
+    profile = profile or load_profile()
+    bg = profile.background
+    fg = profile.foreground
+    border = profile.surface_alt_hex()
+    surface = profile.surface_hex()
+    accent = profile.accent()
+    _sync_waybar_style(bg, fg, border, surface)
+    _sync_mako_colors(bg, fg, border)
+    _sync_fuzzel_colors(bg, fg, border, surface, accent)
+    _sync_hypr_window_borders(border, surface)
+    _sync_gtk_user_css(profile)
+    # On profile change: drop cached GTK dialogs / portal. During session start
+    # (NEURONIX_THEME_NO_HYPR_RELOAD) skip — portal/waybar bring-up already races.
+    if not _theme_session_safe():
+        _restart_system_dialogs()
+    return True
+
+
+def _restart_system_dialogs() -> None:
+    """Drop cached GTK dialog processes so the next open loads fresh user CSS."""
+    relaunch_power = False
+    if shutil.which("pgrep"):
+        try:
+            relaunch_power = (
+                subprocess.run(
+                    ["pgrep", "-f", "xfce4-power-manager-settings"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=3,
+                ).returncode
+                == 0
+            )
+        except Exception:
+            relaunch_power = False
+    if not shutil.which("pkill"):
+        return
+    for pattern in (
+        ["-x", "zenity"],
+        ["-f", "xdg-desktop-portal-gtk"],
+        ["-f", "xfce4-power-manager-settings"],
+    ):
+        try:
+            subprocess.run(
+                ["pkill", *pattern],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=3,
+            )
+        except Exception:
+            pass
+    # Prefer a clean user-unit restart when available (auto-respawns the portal).
+    if shutil.which("systemctl"):
+        try:
+            subprocess.run(
+                ["systemctl", "--user", "restart", "xdg-desktop-portal-gtk.service"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=8,
+            )
+        except Exception:
+            pass
+    # XFCE Power Manager settings caches GTK3 CSS — reopen if it was up.
+    if relaunch_power and shutil.which("xfce4-power-manager-settings"):
+        try:
+            subprocess.Popen(
+                ["xfce4-power-manager-settings"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception:
+            pass
+
+
+_GTK_USER_CSS_BEGIN = "/* BEGIN gtk-theme:shell-chrome */"
+_GTK_USER_CSS_END = "/* END gtk-theme:shell-chrome */"
+
+
+def _system_dialog_css(profile: Profile) -> str:
+    bg = profile.background
+    fg = profile.foreground
+    surface = profile.surface_hex()
+    border = profile.surface_alt_hex()
+    accent = profile.accent()
+    on_accent = "#fbf1c7" if _relative_luminance(accent) < 0.55 else "#1d2021"
+    hover = _mix_hex(bg, fg, 0.12)
+    dim = _mix_hex(fg, bg, 0.35)
+    return f"""{_GTK_USER_CSS_BEGIN}
+/* Suite profile → zenity / FileChooser / XFCE Power Manager / GTK3 settings */
+@define-color theme_bg_color {bg};
+@define-color theme_fg_color {fg};
+@define-color theme_base_color {bg};
+@define-color theme_text_color {fg};
+@define-color theme_selected_bg_color {accent};
+@define-color theme_selected_fg_color {on_accent};
+@define-color theme_unfocused_selected_bg_color {accent};
+@define-color theme_unfocused_selected_fg_color {on_accent};
+@define-color insensitive_bg_color {surface};
+@define-color insensitive_fg_color {dim};
+@define-color insensitive_base_color {surface};
+@define-color borders {border};
+@define-color unfocused_borders {border};
+@define-color accent_bg_color {accent};
+@define-color accent_fg_color {on_accent};
+@define-color accent_color {accent};
+@define-color blue_3 {accent};
+
+/* Exclude DING desktop window — opaque chrome would cover the wallpaper */
+window:not(.desktopwindow),
+window.background:not(.desktopwindow),
+dialog, messagedialog,
+.background:not(.desktopwindow) {{
+  background-color: {bg};
+  background-image: none;
+  color: {fg};
+}}
+window.desktopwindow, window.desktopwindow.background {{
+  background-color: transparent;
+  background-image: none;
+}}
+headerbar, headerbar.default-decoration, .titlebar,
+headerbar:backdrop, .titlebar:backdrop {{
+  background-color: {surface};
+  background-image: none;
+  color: {fg};
+  border-bottom: 1px solid {border};
+  box-shadow: none;
+}}
+headerbar *, .titlebar * {{ color: {fg}; }}
+button {{
+  color: {fg};
+  background-color: {hover};
+  background-image: none;
+  border-color: {border};
+}}
+button:hover {{
+  background-color: {border};
+}}
+button:checked, button.suggested-action, button.suggested-action:hover,
+button.suggested-action:active {{
+  background-color: {accent};
+  background-image: none;
+  color: {on_accent};
+  border-color: {accent};
+}}
+button.suggested-action label, button:checked label {{ color: {on_accent}; }}
+*:selected, treeview:selected, treeview.view:selected,
+treeview.view:selected:focus, list row:selected, listview row:selected,
+.view:selected, .content-view:selected {{
+  background-color: {accent};
+  color: {on_accent};
+}}
+placessidebar, placessidebar list, placessidebar row,
+.sidebar, stacksidebar {{
+  background-color: {surface};
+  background-image: none;
+  color: {fg};
+  border-color: {border};
+}}
+placessidebar row:selected, .sidebar row:selected {{
+  background-color: {accent};
+  color: {on_accent};
+}}
+entry, searchbar entry, spinbutton, spinbutton entry {{
+  background-color: {bg};
+  color: {fg};
+  border-color: {border};
+}}
+filechooser, .filechooser, notebook, paned, frame, frame > border,
+scrolledwindow, viewport, .view, textview, textview text {{
+  background-color: {bg};
+  background-image: none;
+  color: {fg};
+}}
+/* XFCE Power Manager + other GTK3 settings windows */
+notebook > header {{
+  background-color: {surface};
+  background-image: none;
+  border-color: {border};
+}}
+notebook > header > tabs > tab {{
+  background-color: {surface};
+  background-image: none;
+  color: {fg};
+  border-color: {border};
+  box-shadow: none;
+}}
+notebook > header > tabs > tab:hover {{
+  background-color: {hover};
+}}
+notebook > header > tabs > tab:checked {{
+  background-color: {bg};
+  color: {fg};
+  box-shadow: inset 0 -2px {accent};
+}}
+notebook > stack {{
+  background-color: {bg};
+  color: {fg};
+}}
+treeview, treeview.view, list, list row {{
+  background-color: {bg};
+  color: {fg};
+}}
+treeview header button {{
+  background-color: {surface};
+  background-image: none;
+  color: {fg};
+  border-color: {border};
+}}
+label, .label {{ color: {fg}; }}
+separator {{ background-color: {border}; }}
+scale trough {{
+  background-color: {border};
+  background-image: none;
+}}
+scale highlight {{
+  background-color: {accent};
+  background-image: none;
+}}
+scale slider {{
+  background-color: {accent};
+  background-image: none;
+  border-color: {accent};
+}}
+switch {{
+  background-color: {border};
+  background-image: none;
+  border-color: {border};
+}}
+switch:checked {{
+  background-color: {accent};
+  border-color: {accent};
+}}
+switch slider {{
+  background-color: {fg};
+  background-image: none;
+}}
+check, radio {{
+  background-color: {hover};
+  border-color: {border};
+  color: {on_accent};
+}}
+check:checked, radio:checked {{
+  background-color: {accent};
+  border-color: {accent};
+  color: {on_accent};
+}}
+progressbar trough {{
+  background-color: {border};
+}}
+progressbar progress {{
+  background-color: {accent};
+}}
+combobox button.combo, combobox menu {{
+  background-color: {hover};
+  color: {fg};
+  border-color: {border};
+}}
+menubar, menu, popover, popover.background {{
+  background-color: {surface};
+  background-image: none;
+  color: {fg};
+  border-color: {border};
+}}
+menuitem:hover, modelbutton:hover {{
+  background-color: {accent};
+  color: {on_accent};
+}}
+scrollbar, scrollbar contents, scrollbar trough {{
+  background-color: {bg};
+}}
+scrollbar slider {{
+  background-color: {border};
+}}
+toolbar, .primary-toolbar, .inline-toolbar {{
+  background-color: {surface};
+  background-image: none;
+  color: {fg};
+  border-color: {border};
+}}
+{_GTK_USER_CSS_END}
+"""
+
+
+def _upsert_managed_css_block(existing: str, block: str) -> str:
+    start = existing.find(_GTK_USER_CSS_BEGIN)
+    end = existing.find(_GTK_USER_CSS_END)
+    if start >= 0 and end >= 0:
+        end += len(_GTK_USER_CSS_END)
+        after = existing[end:].lstrip("\r\n")
+        out = existing[:start] + block.rstrip() + "\n"
+        if after:
+            out += "\n" + after
+            if not after.endswith("\n"):
+                out += "\n"
+        return out
+    out = existing.rstrip()
+    if out:
+        out += "\n\n"
+    out += block.rstrip() + "\n"
+    return out
+
+
+def _sync_gtk_user_css(profile: Profile) -> None:
+    # GTK3 gets full dialog chrome (zenity). GTK4 only defines colors + dialog
+    # selectors — generic headerbar/window rules at USER priority override suite
+    # chrome and stick until process restart (purple leftovers on light themes).
+    gtk3 = _system_dialog_css(profile)
+    gtk4 = _system_dialog_css_gtk4(profile)
+    prefer = "1" if profile.is_dark() else "0"
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    for ver, block in (("gtk-3.0", gtk3), ("gtk-4.0", gtk4)):
+        d = xdg / ver
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            continue
+        path = d / "gtk.css"
+        try:
+            existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+        except OSError:
+            existing = ""
+        try:
+            path.write_text(_upsert_managed_css_block(existing, block), encoding="utf-8")
+        except OSError:
+            pass
+        settings = d / "settings.ini"
+        try:
+            if settings.is_file():
+                prev = settings.read_text(encoding="utf-8")
+                lines = []
+                found = False
+                for line in prev.splitlines():
+                    if line.lstrip().startswith("gtk-application-prefer-dark-theme"):
+                        lines.append(f"gtk-application-prefer-dark-theme={prefer}")
+                        found = True
+                    else:
+                        lines.append(line)
+                if not found:
+                    if "[Settings]" not in prev:
+                        lines.insert(0, "[Settings]")
+                    lines.append(f"gtk-application-prefer-dark-theme={prefer}")
+                settings.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            else:
+                settings.write_text(
+                    f"[Settings]\ngtk-application-prefer-dark-theme={prefer}\n",
+                    encoding="utf-8",
+                )
+        except OSError:
+            pass
+    _sync_gsettings_color_scheme(profile.is_dark())
+
+
+def _system_dialog_css_gtk4(profile: Profile) -> str:
+    bg = profile.background
+    fg = profile.foreground
+    surface = profile.surface_hex()
+    border = profile.surface_alt_hex()
+    accent = profile.accent()
+    on_accent = "#fbf1c7" if _relative_luminance(accent) < 0.55 else "#1d2021"
+    # Libadwaita (zenity 4+) ignores most widget selectors and reads these
+    # named colors / CSS variables instead. Keep selectors narrow so suite apps
+    # are not overridden at USER priority.
+    return f"""{_GTK_USER_CSS_BEGIN}
+/* Suite profile → libadwaita / zenity-4 dialogs (named colors + dialog only). */
+@define-color theme_bg_color {bg};
+@define-color theme_fg_color {fg};
+@define-color theme_base_color {bg};
+@define-color theme_text_color {fg};
+@define-color theme_selected_bg_color {accent};
+@define-color theme_selected_fg_color {on_accent};
+@define-color theme_unfocused_selected_bg_color {accent};
+@define-color theme_unfocused_selected_fg_color {on_accent};
+@define-color accent_bg_color {accent};
+@define-color accent_fg_color {on_accent};
+@define-color accent_color {accent};
+@define-color blue_3 {accent};
+@define-color window_bg_color {bg};
+@define-color window_fg_color {fg};
+@define-color view_bg_color {bg};
+@define-color view_fg_color {fg};
+@define-color headerbar_bg_color {surface};
+@define-color headerbar_fg_color {fg};
+@define-color headerbar_backdrop_color {surface};
+@define-color headerbar_border_color {border};
+@define-color sidebar_bg_color {surface};
+@define-color sidebar_fg_color {fg};
+@define-color sidebar_backdrop_color {surface};
+@define-color sidebar_border_color {border};
+@define-color secondary_sidebar_bg_color {surface};
+@define-color secondary_sidebar_fg_color {fg};
+@define-color secondary_sidebar_backdrop_color {surface};
+@define-color card_bg_color {surface};
+@define-color card_fg_color {fg};
+@define-color dialog_bg_color {bg};
+@define-color dialog_fg_color {fg};
+
+:root {{
+  --window-bg-color: {bg};
+  --window-fg-color: {fg};
+  --view-bg-color: {bg};
+  --view-fg-color: {fg};
+  --headerbar-bg-color: {surface};
+  --headerbar-fg-color: {fg};
+  --headerbar-backdrop-color: {surface};
+  --headerbar-border-color: {border};
+  --sidebar-bg-color: {surface};
+  --sidebar-fg-color: {fg};
+  --sidebar-backdrop-color: {surface};
+  --sidebar-border-color: {border};
+  --secondary-sidebar-bg-color: {surface};
+  --secondary-sidebar-fg-color: {fg};
+  --secondary-sidebar-backdrop-color: {surface};
+  --card-bg-color: {surface};
+  --card-fg-color: {fg};
+  --dialog-bg-color: {bg};
+  --dialog-fg-color: {fg};
+  --accent-bg-color: {accent};
+  --accent-fg-color: {on_accent};
+  --accent-color: {accent};
+}}
+
+window.messagedialog, window.dialog, window.filechooser,
+.messagedialog, .dialog, .filechooser {{
+  background-color: {bg};
+  color: {fg};
+}}
+window.messagedialog headerbar, window.dialog headerbar, window.filechooser headerbar,
+window.messagedialog .titlebar, window.dialog .titlebar, window.filechooser .titlebar {{
+  background-color: {surface};
+  background-image: none;
+  color: {fg};
+  border-bottom: 1px solid {border};
+}}
+window.messagedialog button.suggested-action,
+window.dialog button.suggested-action,
+window.filechooser button.suggested-action {{
+  background-color: {accent};
+  color: {on_accent};
+}}
+{_GTK_USER_CSS_END}
+"""
+
+
+def _sync_gsettings_color_scheme(is_dark: bool) -> None:
+    scheme = "prefer-dark" if is_dark else "prefer-light"
+    theme = "Adwaita-dark" if is_dark else "Adwaita"
+    if shutil.which("gsettings"):
+        for args in (
+            ["set", "org.gnome.desktop.interface", "color-scheme", scheme],
+            ["set", "org.gnome.desktop.interface", "gtk-theme", theme],
+        ):
+            try:
+                subprocess.run(
+                    ["gsettings", *args],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=5,
+                )
+            except Exception:
+                pass
+    # XFCE Power Manager / xfsettingsd read this channel (may be empty on Hyprland).
+    if shutil.which("xfconf-query"):
+        try:
+            r = subprocess.run(
+                ["xfconf-query", "-c", "xsettings", "-p", "/Net/ThemeName"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=5,
+            )
+            cmd = ["xfconf-query", "-c", "xsettings", "-p", "/Net/ThemeName", "-s", theme]
+            if r.returncode != 0:
+                cmd = [
+                    "xfconf-query",
+                    "-c",
+                    "xsettings",
+                    "-n",
+                    "-t",
+                    "string",
+                    "-p",
+                    "/Net/ThemeName",
+                    "-s",
+                    theme,
+                ]
+            subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=5,
+            )
+        except Exception:
+            pass
+
+
+def _config_candidates(rel: str) -> list[Path]:
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return [xdg / rel, Path.home() / "configs" / rel]
+
+
+def _first_existing_config(rel: str) -> Optional[Path]:
+    for p in _config_candidates(rel):
+        if p.is_file():
+            return p
+    return None
+
+
+def _rewrite_css_block(css: str, selector: str, body: str) -> str:
+    start = css.find(selector)
+    if start < 0:
+        return css
+    after = css[start:]
+    brace = after.find("{")
+    if brace < 0:
+        return css
+    end_rel = after[brace:].find("}")
+    if end_rel < 0:
+        return css
+    end = start + brace + end_rel + 1
+    return css[:start] + f"{selector} {{\n{body}\n}}" + css[end:]
+
+
+def _all_existing_configs(rel: str) -> list[Path]:
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for p in _config_candidates(rel):
+        if not p.is_file():
+            continue
+        try:
+            key = p.resolve()
+        except OSError:
+            key = p
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
+def _rewrite_waybar_global_colors(css: str, fg: str, surface: str) -> str:
+    lines = css.splitlines(keepends=True)
+    out: list[str] = []
+    for line in lines:
+        bare = line.rstrip("\r\n")
+        nl = line[len(bare) :]
+        trimmed = bare.strip()
+        indent = bare[: len(bare) - len(bare.lstrip())]
+        if trimmed in ("color: #f5f5f5;", "color: #ffffff;", "color: #cccccc;", "color: #888888;"):
+            if "#888888" in trimmed:
+                dim = _mix_hex(fg, surface, 0.35)
+            elif "#cccccc" in trimmed:
+                dim = _mix_hex(fg, surface, 0.15)
+            else:
+                dim = fg
+            out.append(f"{indent}color: {dim};{nl or chr(10)}")
+        elif (
+            trimmed.startswith("background: #2e2e2e")
+            or trimmed.startswith("background-color: #2e2e2e")
+            or trimmed.startswith("background: #0a0a0a")
+        ):
+            prop = "background-color" if trimmed.startswith("background-color") else "background"
+            out.append(f"{indent}{prop}: {surface};{nl or chr(10)}")
+        else:
+            out.append(line)
+    return "".join(out)
+
+
+def _restart_waybar() -> None:
+    # Session start already launched waybar; killall+respawn there freezes Hyprland.
+    if _theme_session_safe():
+        if shutil.which("killall"):
+            try:
+                subprocess.run(
+                    ["killall", "-SIGUSR2", "waybar"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=3,
+                )
+            except Exception:
+                pass
+        return
+    try:
+        subprocess.run(
+            ["killall", "waybar"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+    except Exception:
+        pass
+    time.sleep(0.15)
+    try:
+        subprocess.Popen(
+            ["waybar"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        pass
+
+
+def _sync_waybar_style(bg: str, fg: str, border: str, surface: str) -> None:
+    paths = _all_existing_configs("waybar/style.css")
+    if not paths:
+        return
+    for path in paths:
+        try:
+            original = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        out = original
+        out = _rewrite_css_block(
+            out,
+            "window#waybar",
+            f"  background-color: {bg};\n  color: {fg};\n  border-bottom: 2px solid {border};",
+        )
+        out = _rewrite_css_block(
+            out,
+            "#workspaces button.active",
+            f"  color: {fg};\n  background: {surface};",
+        )
+        out = _rewrite_waybar_global_colors(out, fg, surface)
+        if out != original:
+            try:
+                path.write_text(out, encoding="utf-8")
+            except OSError:
+                pass
+    _restart_waybar()
+
+
+def _replace_ini_assign(text: str, key: str, value: str) -> str:
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    prefix = f"{key}="
+    for line in lines:
+        bare = line.rstrip("\r\n")
+        nl = line[len(bare) :]
+        trimmed = bare.lstrip()
+        indent = bare[: len(bare) - len(trimmed)]
+        if trimmed.startswith(prefix):
+            out.append(f"{indent}{key}={value}{nl or chr(10)}")
+        else:
+            out.append(line)
+    return "".join(out)
+
+
+def _sync_mako_colors(bg: str, fg: str, border: str) -> None:
+    path = _first_existing_config("mako/config")
+    if path is None:
+        return
+    try:
+        original = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    out = original
+    out = _replace_ini_assign(out, "background-color", bg)
+    out = _replace_ini_assign(out, "text-color", fg)
+    out = _replace_ini_assign(out, "border-color", border)
+    if out != original:
+        try:
+            path.write_text(out, encoding="utf-8")
+        except OSError:
+            return
+    if shutil.which("makoctl"):
+        try:
+            subprocess.run(
+                ["makoctl", "reload"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=5,
+            )
+        except Exception:
+            pass
+
+
+def _bare_rgba(hex_color: str, alpha: str = "ff") -> str:
+    h = hex_color.lstrip("#")
+    if len(h) == 6:
+        return f"{h}{alpha}"
+    return h
+
+
+def _sync_fuzzel_colors(bg: str, fg: str, border: str, surface: str, accent: str) -> None:
+    path = _first_existing_config("fuzzel/fuzzel.ini")
+    if path is None:
+        return
+    try:
+        original = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    out = original
+    out = _replace_ini_assign(out, "background", _bare_rgba(bg, "f2"))
+    out = _replace_ini_assign(out, "text", _bare_rgba(fg))
+    out = _replace_ini_assign(out, "border", _bare_rgba(border))
+    out = _replace_ini_assign(out, "selection", _bare_rgba(surface))
+    out = _replace_ini_assign(out, "selection-text", _bare_rgba(fg))
+    out = _replace_ini_assign(out, "match", _bare_rgba(accent))
+    out = _replace_ini_assign(out, "selection-match", _bare_rgba(accent))
+    if out != original:
+        try:
+            path.write_text(out, encoding="utf-8")
+        except OSError:
+            pass
+
+
+def _hex_to_hypr_rgba(hex_color: str, alpha: str) -> Optional[str]:
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return None
+    return f"rgba({h.lower()}{alpha})"
+
+
+def _sync_hypr_window_borders(border: str, surface: str) -> None:
+    active = _hex_to_hypr_rgba(border, "aa")
+    inactive = _hex_to_hypr_rgba(surface, "88")
+    if not active or not inactive:
+        return
+    path = _hyprland_conf_path()
+    if path is not None:
+        try:
+            original = path.read_text(encoding="utf-8")
+        except OSError:
+            original = None
+        if original is not None:
+            out = original
+            out = _replace_hypr_assign(out, "col.active_border", active)
+            out = _replace_hypr_assign(out, "col.inactive_border", inactive)
+            out = _replace_hypr_assign(out, "panelBorderColor", active)
+            inactive_ws = _hex_to_hypr_rgba(border, "ff")
+            if inactive_ws:
+                out = _replace_hypr_assign(out, "workspaceInactiveBorder", inactive_ws)
+            if out != original:
+                try:
+                    path.write_text(out, encoding="utf-8")
+                except OSError:
+                    pass
+    if not _theme_session_safe():
+        _hyprctl_keyword("general:col.active_border", active)
+        _hyprctl_keyword("general:col.inactive_border", inactive)
+
+
 # ---------------------------------------------------------------------------
 # GTK4
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# gtk-neurond autostart (suite-wide)
+# ---------------------------------------------------------------------------
+
+
+def _neuron_socket_path() -> Path:
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    if runtime:
+        return Path(runtime) / "gtk-neuron.sock"
+    cache = Path.home() / ".cache" / "gtk-apps"
+    return cache / "gtk-neuron.sock"
+
+
+def _neuron_socket_connectable() -> bool:
+    sock = _neuron_socket_path()
+    if not sock.exists():
+        return False
+    try:
+        import socket
+
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.settimeout(0.2)
+            s.connect(str(sock))
+            return True
+        finally:
+            s.close()
+    except OSError:
+        return False
+
+
+def _find_neurond_binary() -> Optional[Path]:
+    env = os.environ.get("GTK_NEUROND", "").strip()
+    if env and Path(env).is_file():
+        return Path(env)
+
+    candidates = [
+        _SUITE_ROOT / "gtk-neuron" / "target" / "release" / "gtk-neurond",
+        _SUITE_ROOT / "gtk-neuron" / "target" / "debug" / "gtk-neurond",
+        Path("/usr/local/lib/neuronix/gtk-apps/gtk-neuron/gtk-neurond"),
+        Path("/usr/local/bin/gtk-neurond"),
+    ]
+    which = shutil.which("gtk-neurond")
+    if which:
+        candidates.append(Path(which))
+
+    for c in candidates:
+        if c.is_file() and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+def ensure_neuron_daemon() -> None:
+    """Start gtk-neurond if it is not already listening (best-effort)."""
+    if _neuron_socket_connectable():
+        return
+    sock = _neuron_socket_path()
+    try:
+        if sock.exists():
+            sock.unlink()
+    except OSError:
+        pass
+    exe = _find_neurond_binary()
+    if exe is None:
+        return
+    try:
+        sock.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.Popen(
+            [str(exe), "--daemon"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return
+    for _ in range(40):
+        time.sleep(0.05)
+        if _neuron_socket_connectable():
+            return
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -787,6 +1654,8 @@ def apply_chrome(profile: Optional[Profile] = None) -> None:
     gi.require_version("Gtk", "4.0")
     gi.require_version("Gdk", "4.0")
     from gi.repository import Gdk, Gtk
+
+    ensure_neuron_daemon()
 
     profile = profile or load_profile()
     hide_csd = hyprbars_active()
@@ -1212,6 +2081,8 @@ def apply_chrome_gtk3(profile: Optional[Profile] = None) -> None:
     gi.require_version("Gtk", "3.0")
     gi.require_version("Gdk", "3.0")
     from gi.repository import Gdk, Gtk
+
+    ensure_neuron_daemon()
 
     profile = profile or load_profile()
     settings = Gtk.Settings.get_default()

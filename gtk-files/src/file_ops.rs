@@ -1,5 +1,7 @@
 //! File operations: copy, move, trash, delete, rename, mkdir, link.
 
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -380,7 +382,7 @@ pub fn paste_into(
         return;
     };
     let clip = Rc::clone(clip);
-    drop_into(parent, dest_dir, &paths, op == ClipOp::Cut, move || {
+    drop_into(parent, dest_dir, &paths, op == ClipOp::Cut, false, move || {
         if op == ClipOp::Cut {
             clear_after_cut_paste(&clip);
         }
@@ -389,12 +391,19 @@ pub fn paste_into(
 }
 
 /// Copy or move `paths` into `dest_dir` (used by paste and drag-and-drop).
+///
+/// - `overwrite == false`: uniquify names (`file (1).ext`) so existing items
+///   are never replaced.
+/// - `overwrite == true` (Shift+drop = move+clobber): keep the same name; if a
+///   destination already exists, ask Replace / Skip / Apply to Rest / Cancel.
+///
 /// Large jobs run off the UI thread with a non-blocking sidebar progress panel.
 pub fn drop_into(
     parent: Option<&impl IsA<gtk::Window>>,
     dest_dir: &Path,
     paths: &[PathBuf],
     move_files: bool,
+    overwrite: bool,
     on_done: impl FnOnce() + 'static,
 ) {
     if paths.is_empty() || !dest_dir.is_dir() {
@@ -405,7 +414,7 @@ pub fn drop_into(
     let dest_dir = dest_dir.to_path_buf();
     let paths: Vec<PathBuf> = paths.to_vec();
 
-    let jobs: Vec<(PathBuf, PathBuf)> = paths
+    let pending: Vec<(PathBuf, PathBuf)> = paths
         .iter()
         .filter_map(|src| {
             if move_files && src.parent().is_some_and(|p| p == dest_dir) {
@@ -415,11 +424,37 @@ pub fn drop_into(
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "item".into());
-            let dest = uniquify_path(&dest_dir, &name);
+            let dest = if overwrite {
+                dest_dir.join(&name)
+            } else {
+                uniquify_path(&dest_dir, &name)
+            };
+            // Same path (dropping onto self) — skip.
+            if paths_same_file(src, &dest) {
+                return None;
+            }
             Some((src.clone(), dest))
         })
         .collect();
 
+    if pending.is_empty() {
+        on_done();
+        return;
+    }
+
+    if overwrite {
+        resolve_overwrite_jobs(parent_win, pending, move_files, on_done);
+    } else {
+        run_jobs(parent_win, pending, move_files, on_done);
+    }
+}
+
+fn run_jobs(
+    parent_win: Option<gtk::Window>,
+    jobs: Vec<(PathBuf, PathBuf)>,
+    move_files: bool,
+    on_done: impl FnOnce() + 'static,
+) {
     if jobs.is_empty() {
         on_done();
         return;
@@ -429,7 +464,6 @@ pub fn drop_into(
     let show_progress = total_bytes >= PROGRESS_THRESHOLD_BYTES || jobs.len() > 3;
 
     if !show_progress {
-        // Tiny jobs: keep the old synchronous path (feels instant).
         for (src, dest) in &jobs {
             let result = transfer_one(src, dest, move_files, &mut |_| Ok(()));
             if let Err(e) = result {
@@ -445,6 +479,265 @@ pub fn drop_into(
     }
 
     run_transfer_with_progress(parent_win.as_ref(), jobs, move_files, total_bytes, on_done);
+}
+
+/// Ask about name conflicts when Shift+dropping (move + clobber), then transfer.
+fn resolve_overwrite_jobs(
+    parent_win: Option<gtk::Window>,
+    pending: Vec<(PathBuf, PathBuf)>,
+    move_files: bool,
+    on_done: impl FnOnce() + 'static,
+) {
+    type DoneSlot = Rc<RefCell<Option<Box<dyn FnOnce()>>>>;
+    let on_done: DoneSlot = Rc::new(RefCell::new(Some(Box::new(on_done))));
+    let accepted: Rc<RefCell<Vec<(PathBuf, PathBuf)>>> = Rc::new(RefCell::new(Vec::new()));
+    let replace_all = Rc::new(Cell::new(false));
+    let skip_all = Rc::new(Cell::new(false));
+    let remaining = Rc::new(RefCell::new(VecDeque::from(pending)));
+
+    fn finish(
+        parent_win: Option<gtk::Window>,
+        accepted: Rc<RefCell<Vec<(PathBuf, PathBuf)>>>,
+        move_files: bool,
+        on_done: DoneSlot,
+    ) {
+        let jobs = accepted.borrow().clone();
+        let done = on_done.borrow_mut().take();
+        run_jobs(parent_win, jobs, move_files, move || {
+            if let Some(f) = done {
+                f();
+            }
+        });
+    }
+
+    fn step(
+        parent_win: Option<gtk::Window>,
+        remaining: Rc<RefCell<VecDeque<(PathBuf, PathBuf)>>>,
+        accepted: Rc<RefCell<Vec<(PathBuf, PathBuf)>>>,
+        replace_all: Rc<Cell<bool>>,
+        skip_all: Rc<Cell<bool>>,
+        move_files: bool,
+        on_done: DoneSlot,
+    ) {
+        loop {
+            let Some((src, dest)) = remaining.borrow_mut().pop_front() else {
+                finish(parent_win, accepted, move_files, on_done);
+                return;
+            };
+
+            if skip_all.get() && dest.exists() {
+                continue;
+            }
+
+            if !dest.exists() || replace_all.get() {
+                if dest.exists() {
+                    if let Err(e) = remove_path(&dest) {
+                        show_error(
+                            parent_win.as_ref(),
+                            "Replace failed",
+                            &format!("Could not remove {}: {e}", dest.display()),
+                        );
+                        continue;
+                    }
+                }
+                accepted.borrow_mut().push((src, dest));
+                continue;
+            }
+
+            let name = dest
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| dest.display().to_string());
+            let kind = if dest.is_dir() { "folder" } else { "file" };
+            let verb = if move_files { "move" } else { "copy" };
+            let detail = format!(
+                "A {kind} named “{name}” already exists in the destination.\n\n\
+                 Replace it with the one you are {verb}ing?"
+            );
+
+            let more = !remaining.borrow().is_empty();
+            let parent_for_dialog = parent_win.clone();
+            let remaining2 = Rc::clone(&remaining);
+            let accepted2 = Rc::clone(&accepted);
+            let replace_all2 = Rc::clone(&replace_all);
+            let skip_all2 = Rc::clone(&skip_all);
+            let on_done2 = Rc::clone(&on_done);
+            let src2 = src.clone();
+            let dest2 = dest.clone();
+
+            // When more conflicts remain: Cancel | Skip | Skip Rest | Replace | Apply to Rest
+            let dialog = if more {
+                gtk::AlertDialog::builder()
+                    .modal(true)
+                    .message("Replace existing item?")
+                    .detail(&detail)
+                    .buttons([
+                        "Cancel",
+                        "Skip",
+                        "Skip Rest",
+                        "Replace",
+                        "Apply to Rest",
+                    ])
+                    .default_button(3)
+                    .cancel_button(0)
+                    .build()
+            } else {
+                gtk::AlertDialog::builder()
+                    .modal(true)
+                    .message("Replace existing item?")
+                    .detail(&detail)
+                    .buttons(["Cancel", "Skip", "Replace"])
+                    .default_button(2)
+                    .cancel_button(0)
+                    .build()
+            };
+
+            dialog.choose(
+                parent_for_dialog.as_ref(),
+                None::<&gio::Cancellable>,
+                move |res| {
+                    let choice = res.unwrap_or(0);
+                    if more {
+                        match choice {
+                            0 => {
+                                remaining2.borrow_mut().clear();
+                                finish(parent_win, accepted2, move_files, on_done2);
+                            }
+                            1 => {
+                                step(
+                                    parent_win,
+                                    remaining2,
+                                    accepted2,
+                                    replace_all2,
+                                    skip_all2,
+                                    move_files,
+                                    on_done2,
+                                );
+                            }
+                            2 => {
+                                skip_all2.set(true);
+                                step(
+                                    parent_win,
+                                    remaining2,
+                                    accepted2,
+                                    replace_all2,
+                                    skip_all2,
+                                    move_files,
+                                    on_done2,
+                                );
+                            }
+                            3 => {
+                                if let Err(e) = remove_path(&dest2) {
+                                    show_error(
+                                        parent_win.as_ref(),
+                                        "Replace failed",
+                                        &format!("Could not remove {}: {e}", dest2.display()),
+                                    );
+                                } else {
+                                    accepted2.borrow_mut().push((src2, dest2));
+                                }
+                                step(
+                                    parent_win,
+                                    remaining2,
+                                    accepted2,
+                                    replace_all2,
+                                    skip_all2,
+                                    move_files,
+                                    on_done2,
+                                );
+                            }
+                            4 => {
+                                replace_all2.set(true);
+                                if let Err(e) = remove_path(&dest2) {
+                                    show_error(
+                                        parent_win.as_ref(),
+                                        "Replace failed",
+                                        &format!("Could not remove {}: {e}", dest2.display()),
+                                    );
+                                } else {
+                                    accepted2.borrow_mut().push((src2, dest2));
+                                }
+                                step(
+                                    parent_win,
+                                    remaining2,
+                                    accepted2,
+                                    replace_all2,
+                                    skip_all2,
+                                    move_files,
+                                    on_done2,
+                                );
+                            }
+                            _ => {
+                                remaining2.borrow_mut().clear();
+                                finish(parent_win, accepted2, move_files, on_done2);
+                            }
+                        }
+                    } else {
+                        match choice {
+                            0 => {
+                                remaining2.borrow_mut().clear();
+                                finish(parent_win, accepted2, move_files, on_done2);
+                            }
+                            1 => {
+                                step(
+                                    parent_win,
+                                    remaining2,
+                                    accepted2,
+                                    replace_all2,
+                                    skip_all2,
+                                    move_files,
+                                    on_done2,
+                                );
+                            }
+                            2 => {
+                                if let Err(e) = remove_path(&dest2) {
+                                    show_error(
+                                        parent_win.as_ref(),
+                                        "Replace failed",
+                                        &format!("Could not remove {}: {e}", dest2.display()),
+                                    );
+                                } else {
+                                    accepted2.borrow_mut().push((src2, dest2));
+                                }
+                                step(
+                                    parent_win,
+                                    remaining2,
+                                    accepted2,
+                                    replace_all2,
+                                    skip_all2,
+                                    move_files,
+                                    on_done2,
+                                );
+                            }
+                            _ => {
+                                remaining2.borrow_mut().clear();
+                                finish(parent_win, accepted2, move_files, on_done2);
+                            }
+                        }
+                    }
+                },
+            );
+            return;
+        }
+    }
+
+    step(
+        parent_win,
+        remaining,
+        accepted,
+        replace_all,
+        skip_all,
+        move_files,
+        on_done,
+    );
+}
+
+fn remove_path(path: &Path) -> Result<(), String> {
+    if path.is_dir() {
+        std::fs::remove_dir_all(path).map_err(|e| e.to_string())
+    } else {
+        std::fs::remove_file(path).map_err(|e| e.to_string())
+    }
 }
 
 fn transfer_one(

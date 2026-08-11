@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stop, rebuild (compiled apps only), and relaunch GTK-Apps for local testing.
+# Stop, rebuild (compiled apps only), sync to Neuronix/KvNix, and relaunch GTK-Apps.
 #
 # Usage:
 #   ./build-launch.sh                         # all apps
@@ -8,6 +8,7 @@
 #
 # Rust apps (Cargo.toml): cargo build --release, then run the binary.
 # Python / script apps: skip build; run via launch/start/run.sh or python entrypoint.
+# After each rebuild, runs ./syn-to-devices.sh (Neuronix + KvNix gtk-apps trees).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,7 +19,7 @@ if ! command -v cargo >/dev/null 2>&1; then
   [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
 fi
 
-# Suite apps (gtk-theme is a library — not launched).
+# Suite apps (gtk-theme / gtk-neuron are libraries — not launched as windows).
 ALL_APPS=(
   gtk-calc
   gtk-edit
@@ -189,6 +190,9 @@ stop_one() {
 stop_apps() {
   echo "==> Stopping: ${APPS[*]}"
   local app
+  if needs_neuron; then
+    stop_neuron
+  fi
   for app in "${APPS[@]}"; do
     stop_one "$app" TERM
   done
@@ -238,6 +242,7 @@ make_cargo_targets_mutable() {
   echo "==> Marking cargo build trees mutable..."
   local app dir kind target
   make_mutable "$ROOT/gtk-theme/target"
+  make_mutable "$ROOT/gtk-neuron/target"
   for app in "${APPS[@]}"; do
     kind="$(app_kind "$app")"
     [[ "$kind" == rust ]] || continue
@@ -250,6 +255,67 @@ make_cargo_targets_mutable() {
     # Common out-of-Dropbox dirs used by this suite.
     make_mutable "/tmp/${app}-target"
   done
+}
+
+needs_neuron() {
+  local app
+  for app in "${APPS[@]}"; do
+    case "$app" in
+      gtk-edit | gtk-files | gtk-image | gtk-term) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+build_neuron() {
+  local dir="$ROOT/gtk-neuron"
+  local target bin dest
+  echo "    building gtk-neuron (daemon)..."
+  make_mutable "$dir/target"
+  if ! (cd "$dir" && cargo build --release); then
+    echo "    gtk-neuron FAILED" >&2
+    return 1
+  fi
+  target="$(cargo_target_dir "$dir")"
+  [[ -n "$target" ]] || target="$dir/target"
+  bin="$target/release/gtk-neurond"
+  dest="$dir/target/release/gtk-neurond"
+  mkdir -p "$dir/target/release"
+  make_mutable "$dest"
+  if [[ -f "$bin" ]]; then
+    if [[ "$(readlink -f "$bin" 2>/dev/null || echo "$bin")" != \
+          "$(readlink -f "$dest" 2>/dev/null || echo "$dest")" ]]; then
+      cp -f "$bin" "$dest"
+    fi
+    chmod u+wx "$dest" 2>/dev/null || true
+  fi
+  echo "    gtk-neuron OK"
+}
+
+stop_neuron() {
+  if pgrep -x gtk-neurond >/dev/null 2>&1; then
+    echo "    stopping gtk-neurond"
+    pkill -x gtk-neurond || true
+  fi
+  local sock="${XDG_RUNTIME_DIR:-}/gtk-neuron.sock"
+  if [[ -n "${XDG_RUNTIME_DIR:-}" && -S "$sock" ]]; then
+    rm -f "$sock"
+  fi
+}
+
+ensure_neuron_running() {
+  local bin="$ROOT/gtk-neuron/target/release/gtk-neurond"
+  if pgrep -x gtk-neurond >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ ! -x "$bin" ]]; then
+    echo "    warn: gtk-neurond missing at $bin (apps will try to autostart)" >&2
+    return 0
+  fi
+  echo "    starting gtk-neurond"
+  export GTK_NEUROND="$bin"
+  "$bin" --daemon >/dev/null 2>&1 &
+  disown || true
 }
 
 # Copy the freshly built binary into $app/target/release/ for launchers that
@@ -280,6 +346,9 @@ build_apps() {
   local app dir kind
   FAILED_APPS=()
   READY_APPS=()
+  if needs_neuron; then
+    build_neuron || FAILED_APPS+=("gtk-neuron")
+  fi
   for app in "${APPS[@]}"; do
     kind="$(app_kind "$app")"
     dir="$ROOT/$app"
@@ -304,6 +373,10 @@ build_apps() {
 launch_apps() {
   echo "==> Launching apps..."
   local app kind bin cmd launched=0
+  if needs_neuron; then
+    export GTK_NEUROND="$ROOT/gtk-neuron/target/release/gtk-neurond"
+    ensure_neuron_running
+  fi
   for app in "${READY_APPS[@]:-}"; do
     [[ -n "$app" ]] || continue
     kind="$(app_kind "$app")"
@@ -311,7 +384,7 @@ launch_apps() {
       # Prefer run.sh when present (resolves /tmp vs in-tree target-dir).
       if [[ -x "$ROOT/$app/run.sh" ]]; then
         echo "    launching $app (run.sh)"
-        "$ROOT/$app/run.sh" >/dev/null 2>&1 &
+        GTK_NEUROND="${GTK_NEUROND:-}" "$ROOT/$app/run.sh" >/dev/null 2>&1 &
         disown || true
         launched=$((launched + 1))
         continue
@@ -340,11 +413,22 @@ launch_apps() {
   echo "    launched $launched app(s)"
 }
 
+sync_to_devices() {
+  local sync="$ROOT/syn-to-devices.sh"
+  if [[ ! -x "$sync" ]]; then
+    echo "==> warn: missing or non-executable $sync (skipping sync)" >&2
+    return 0
+  fi
+  echo "==> Syncing built apps to Neuronix / KvNix (syn-to-devices.sh)..."
+  "$sync"
+}
+
 resolve_apps "$@"
 setup_pkg_config
 stop_apps
 make_cargo_targets_mutable
 build_apps
+sync_to_devices
 launch_apps
 
 if ((${#FAILED_APPS[@]} > 0)); then

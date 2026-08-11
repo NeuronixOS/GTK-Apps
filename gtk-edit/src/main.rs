@@ -19,6 +19,7 @@ mod replace;
 mod search;
 mod statusbar;
 mod tab;
+mod neuron;
 mod window;
 
 use std::cell::RefCell;

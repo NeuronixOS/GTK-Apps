@@ -21,11 +21,12 @@ Suite of GTK4 desktop apps for Neuronix. Apps share color profiles and UI chrome
 | `gtk-worktimezone` | Python | Coworker timezone tracker (edit/view local times across zones) |
 | `gtk-sync` | Rust | LAN file sync (client + server): HTTPS/TLS mesh, CouchDB metadata, systemd `gtk-sync` / `gtk-sync-client` |
 
-Shared library (not launched as an app):
+Shared libraries (not launched as suite windows by default):
 
 | Path | Role |
 |------|------|
 | `gtk-theme` | Color profiles, Profile menu, Adwaita icon helpers for Rust and Python suite apps |
+| `gtk-neuron` | AI driving daemon (`gtk-neurond`) + client/Driving UI (ꔮ) for files/term/edit/image |
 
 ## Runtime icons
 

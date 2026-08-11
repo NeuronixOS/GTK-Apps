@@ -87,6 +87,15 @@ impl Config {
         if self.window_height < 420 {
             self.window_height = 520;
         }
+        // Basic/portrait calc should stay compact (avoid restoring a tiled fullscreen size).
+        if matches!(self.mode, CalcMode::Basic | CalcMode::Keyboard) {
+            if self.window_width > 420 {
+                self.window_width = 340;
+            }
+            if self.window_height > 640 {
+                self.window_height = 520;
+            }
+        }
     }
 }
 

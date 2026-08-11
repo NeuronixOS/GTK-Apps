@@ -15,6 +15,7 @@
 //!   - Zoom, fullscreen, read-only, built-in color profiles
 
 mod config;
+mod neuron;
 mod prefs;
 mod search;
 mod terminal;
@@ -268,7 +269,7 @@ fn build_window_shell(
         window.maximize();
     }
     window.set_titlebar(Some(&header));
-    window.set_child(Some(&main_box));
+    neuron::attach(&header, &window, &main_box, &notebook, &cfg);
 
     {
         let notebook_weak = notebook.downgrade();
@@ -375,6 +376,7 @@ fn build_menu_button(zoom_label: &gtk::Label, notebook: &gtk::Notebook) -> gtk::
     let window_section = gio::Menu::new();
     icons.append_action(&window_section, "New Window", "app.new-window");
     icons.append_action(&window_section, "Full Screen", "win.fullscreen");
+    gtk_neuron::append_driving_menu_item(&mut icons, &window_section);
     menu.append_section(None, &window_section);
 
     // Read-only toggle.

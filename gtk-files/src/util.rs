@@ -205,11 +205,14 @@ pub fn path_display(path: &Path) -> String {
 }
 
 pub fn title_for_location(file: &gio::File) -> String {
+    if is_trash_location(file) {
+        return "Trash".into();
+    }
     if let Some(path) = file.path() {
         if path == home_dir() {
             return "Home".into();
         }
-        if file.uri() == "trash:///" || path.ends_with(".local/share/Trash/files") {
+        if path.ends_with(".local/share/Trash/files") {
             return "Trash".into();
         }
         return path
@@ -220,6 +223,35 @@ pub fn title_for_location(file: &gio::File) -> String {
     file.basename()
         .map(|b| b.to_string_lossy().to_string())
         .unwrap_or_else(|| file.uri().to_string())
+}
+
+/// Resolve a CLI / desktop-open argument to a folder (or trash) to browse.
+///
+/// Prefer [`gio::File::for_commandline_arg`] over `for_path` so URIs like
+/// `trash:///` are not treated as relative filesystem paths.
+pub fn location_from_open_arg(arg: impl AsRef<std::ffi::OsStr>, cwd: Option<&Path>) -> gio::File {
+    let file = match cwd {
+        Some(cwd) => gio::File::for_commandline_arg_and_cwd(arg, cwd),
+        None => gio::File::for_commandline_arg(arg),
+    };
+    if is_trash_location(&file) {
+        return trash_file();
+    }
+    if let Some(path) = file.path() {
+        if path.is_dir() {
+            return gio::File::for_path(path);
+        }
+        if let Some(parent) = path.parent() {
+            return gio::File::for_path(parent);
+        }
+    }
+    // Remote / special URI (sftp://, trash://, …).
+    file
+}
+
+pub fn is_trash_path(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    s == "trash:///" || s.starts_with("trash:")
 }
 
 pub fn trash_file() -> gio::File {

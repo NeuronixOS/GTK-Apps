@@ -50,7 +50,9 @@ syn-to-devices.sh
 **/token.json
 .env
 .env.*
-
+**/gtk-neuron/credentials.toml
+!**/gtk-neuron/examples/credentials.toml
+**/gtk-neuron/python/.venv/
 # Tooling caches
 .coverage
 .flatpak-builder/
