@@ -3,6 +3,8 @@
 //! Also sets up clickable URL matching (ported from gnome-terminal's
 //! terminal-regex.hh patterns).
 
+use std::path::Path;
+
 use gtk4 as gtk;
 use gtk::{gio, glib};
 use vte4::prelude::*;
@@ -27,7 +29,13 @@ const URL_REGEX_PATTERNS: &[&str] = &[
 
 /// Create a fully configured `vte4::Terminal` with the user's theme applied,
 /// URL matching registered, and the login shell already spawned.
+#[allow(dead_code)]
 pub fn build_terminal(config: &Config) -> vte4::Terminal {
+    build_terminal_in(config, None)
+}
+
+/// Like [`build_terminal`], spawning the shell in `cwd` when given.
+pub fn build_terminal_in(config: &Config, cwd: Option<&Path>) -> vte4::Terminal {
     let terminal = vte4::Terminal::new();
     apply_settings(&terminal, config);
 
@@ -40,7 +48,7 @@ pub fn build_terminal(config: &Config) -> vte4::Terminal {
     );
 
     register_url_patterns(&terminal);
-    spawn_shell(&terminal);
+    spawn_shell(&terminal, cwd);
     terminal
 }
 
@@ -120,16 +128,25 @@ fn register_url_patterns(terminal: &vte4::Terminal) {
     }
 }
 
-fn spawn_shell(terminal: &vte4::Terminal) {
+fn spawn_shell(terminal: &vte4::Terminal, cwd: Option<&Path>) {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let dir = cwd
+        .filter(|p| p.is_dir())
+        .map(|p| p.to_string_lossy().into_owned())
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .filter(|p| p.is_dir())
+                .map(|p| p.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".to_string()));
 
     let argv = [shell.as_str()];
     let envv: &[&str] = &[];
 
     terminal.spawn_async(
         vte4::PtyFlags::DEFAULT,
-        Some(&home),
+        Some(&dir),
         &argv,
         envv,
         glib::SpawnFlags::DEFAULT,

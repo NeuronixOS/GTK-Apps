@@ -295,6 +295,70 @@ fn fallback_xdg_open(file: &gio::File) {
     }
 }
 
+/// Open a new gtk-term (or desktop terminal) with cwd `dir`.
+pub fn open_terminal_here(dir: &Path) -> Result<(), String> {
+    let dir = if dir.is_dir() {
+        dir.to_path_buf()
+    } else {
+        dir.parent()
+            .filter(|p| p.is_dir())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(home_dir)
+    };
+    if !dir.is_dir() {
+        return Err(format!("Not a directory: {}", dir.display()));
+    }
+
+    // Prefer the suite binary with an explicit cwd flag (works with a running
+    // gtk-term primary instance via GApplication command-line).
+    let suite_bin = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|p| p.join("gtk-term/target/release/gtk-term"));
+    if let Some(bin) = suite_bin {
+        if bin.is_file() {
+            if std::process::Command::new(&bin)
+                .arg("--working-directory")
+                .arg(&dir)
+                .spawn()
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    if let Some(cfg) = dirs::config_dir() {
+        let launch = cfg.join("gtk-apps/applications/gtk-term-launch.sh");
+        if launch.is_file() {
+            if std::process::Command::new(&launch)
+                .arg("--working-directory")
+                .arg(&dir)
+                .spawn()
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    for bin in ["gtk-term", "x-terminal-emulator", "kgx", "gnome-terminal", "xterm"] {
+        let mut cmd = std::process::Command::new(bin);
+        match bin {
+            "gtk-term" | "x-terminal-emulator" | "kgx" | "gnome-terminal" => {
+                cmd.arg("--working-directory").arg(&dir);
+            }
+            _ => {
+                cmd.current_dir(&dir);
+            }
+        }
+        if cmd.spawn().is_ok() {
+            return Ok(());
+        }
+    }
+
+    Err("No terminal found (tried gtk-term, x-terminal-emulator, gnome-terminal, xterm)".into())
+}
+
 #[allow(dead_code)]
 pub fn open_containing_folder(parent: Option<&impl IsA<gtk::Window>>, file: &gio::File) {
     if let Some(parent_file) = file.parent() {

@@ -374,6 +374,7 @@ pub fn icon_for_action(action: &str) -> &'static str {
         }
 
         // Terminal
+        "new-terminal" => "utilities-terminal-symbolic",
         "reset" | "reset-terminal" => "edit-clear-symbolic",
         "read-only" => "emblem-readonly-symbolic",
         "copy-input" => "edit-copy-symbolic",

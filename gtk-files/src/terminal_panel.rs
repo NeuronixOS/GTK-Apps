@@ -279,12 +279,26 @@ fn patch_histcontrol(env: &mut Vec<String>) {
 }
 
 fn feed_cd(terminal: &vte4::Terminal, path: &Path) {
+    terminal.feed_child(history_safe_cd(path).as_bytes());
+}
+
+/// Ctrl-U, then a cd that does not stay in shell history, then Ctrl-L to clear.
+fn history_safe_cd(path: &Path) -> String {
     let escaped = shell_single_quote(&path.to_string_lossy());
-    // Leading space + HISTCONTROL/ignorespace (bash) or HIST_IGNORE_SPACE (zsh)
-    // keeps folder-navigation cds out of the user's shell history.
-    // Ctrl-U clears the current input line, then Ctrl-L clears the screen.
-    let cmd = format!("\u{15} cd -- {escaped}\n\u{0c}");
-    terminal.feed_child(cmd.as_bytes());
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let name = Path::new(&shell)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("bash");
+    // Ctrl-U clears typed input; Ctrl-L (\u{0c}) clears the screen like the keybind.
+    match name {
+        "zsh" => format!("\u{15} cd -- {escaped}\n\u{0c}"),
+        "fish" => format!("\u{15} cd {escaped}\n\u{0c}"),
+        // bash: record-then-delete so it works even if .bashrc reset HISTCONTROL.
+        _ => format!(
+            "\u{15} builtin cd -- {escaped} && {{ history -d $(history 1) 2>/dev/null || true; }}\n\u{0c}"
+        ),
+    }
 }
 
 fn shell_single_quote(s: &str) -> String {

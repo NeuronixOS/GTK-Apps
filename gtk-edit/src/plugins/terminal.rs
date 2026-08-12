@@ -20,6 +20,7 @@ struct TerminalState {
     terminal: vte4::Terminal,
     cwd: RefCell<PathBuf>,
     alive: Cell<bool>,
+    spawning: Cell<bool>,
     /// When false, the terminal lives in its own window and no longer follows
     /// the editor's active document directory.
     follow_editor: Cell<bool>,
@@ -103,6 +104,7 @@ impl WindowActivatable for TerminalPlugin {
             terminal,
             cwd: RefCell::new(start),
             alive: Cell::new(false),
+            spawning: Cell::new(false),
             follow_editor: Cell::new(true),
             window: ctx.window.clone(),
             slot: Rc::clone(&self.state),
@@ -124,6 +126,7 @@ impl WindowActivatable for TerminalPlugin {
                     return;
                 }
                 panel.alive.set(false);
+                panel.spawning.set(false);
                 let weak = Rc::downgrade(&panel);
                 glib::idle_add_local_once(move || {
                     if let Some(panel) = weak.upgrade() {
@@ -169,13 +172,20 @@ impl WindowActivatable for TerminalPlugin {
         }
 
         *self.state.borrow_mut() = Some(Rc::clone(&state));
-        // Set cwd from the focused document first, then spawn once in that folder
-        // (avoid spawning in $HOME and racing a second spawn on sync).
+        // Set cwd from the focused document first. Spawn on idle so session
+        // restore / open_files can retarget cwd before the shell starts —
+        // otherwise we spawn in $HOME and later skip cd (path already "matches").
         if let Some(ew) = crate::window::current_from_window(&ctx.window) {
             ew.sync_terminal_cwd();
         } else {
             state.sync_to_active_document();
         }
+        let delayed = Rc::clone(&state);
+        glib::idle_add_local_once(move || {
+            if !delayed.alive.get() && !delayed.spawning.get() {
+                delayed.spawn_shell();
+            }
+        });
     }
 
     fn deactivate(&mut self) {
@@ -225,9 +235,7 @@ impl TerminalState {
             Ok(p) => p,
             Err(_) => path.to_path_buf(),
         };
-        if *self.cwd.borrow() == path && self.alive.get() {
-            return;
-        }
+        let already = *self.cwd.borrow() == path;
         *self.cwd.borrow_mut() = path.clone();
         unsafe {
             if let Some(label) = self.root.data::<gtk::Label>("path-label") {
@@ -235,13 +243,18 @@ impl TerminalState {
             }
         }
         if self.alive.get() {
-            feed_cd(&self.terminal, &path);
-        } else {
-            self.spawn_shell();
+            if !already {
+                feed_cd(&self.terminal, &path);
+            }
         }
+        // If the shell is not up yet, spawn_shell (idle / child-exited) uses cwd.
     }
 
     fn spawn_shell(self: &Rc<Self>) {
+        if self.spawning.get() {
+            return;
+        }
+        self.spawning.set(true);
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
         let dir = self.cwd.borrow().to_string_lossy().into_owned();
         let is_zsh = shell.rsplit('/').next().is_some_and(|n| n == "zsh");
@@ -259,6 +272,7 @@ impl TerminalState {
         let env_refs: Vec<&str> = env_owned.iter().map(String::as_str).collect();
 
         let weak = Rc::downgrade(self);
+        let spawn_dir = dir.clone();
 
         self.terminal.spawn_async(
             vte4::PtyFlags::DEFAULT,
@@ -273,8 +287,16 @@ impl TerminalState {
                 let Some(panel) = weak.upgrade() else {
                     return;
                 };
+                panel.spawning.set(false);
                 match result {
-                    Ok(_) => panel.alive.set(true),
+                    Ok(_) => {
+                        panel.alive.set(true);
+                        inject_histcontrol(&panel.terminal);
+                        let now = panel.cwd.borrow().clone();
+                        if now != PathBuf::from(&spawn_dir) {
+                            feed_cd(&panel.terminal, &now);
+                        }
+                    }
                     Err(err) => {
                         panel.alive.set(false);
                         eprintln!("gtk-edit: failed to spawn terminal shell: {err}");
@@ -520,12 +542,43 @@ fn patch_histcontrol(env: &mut Vec<String>) {
     }
 }
 
+fn inject_histcontrol(terminal: &vte4::Terminal) {
+    // Queued on the PTY until .bashrc finishes, then re-applies ignorespace
+    // in case the user's rc overwrote HISTCONTROL from the spawn environment.
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let name = Path::new(&shell)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("bash");
+    let cmd = match name {
+        "zsh" => " setopt HIST_IGNORE_SPACE\n",
+        "fish" => "",
+        _ => " HISTCONTROL=\"${HISTCONTROL:+$HISTCONTROL:}ignorespace\"; export HISTCONTROL\n",
+    };
+    if !cmd.is_empty() {
+        terminal.feed_child(cmd.as_bytes());
+    }
+}
+
 fn feed_cd(terminal: &vte4::Terminal, path: &Path) {
+    terminal.feed_child(history_safe_cd(path).as_bytes());
+}
+
+fn history_safe_cd(path: &Path) -> String {
     let escaped = shell_single_quote(&path.to_string_lossy());
-    // Leading space + HISTCONTROL/ignorespace (bash) or HIST_IGNORE_SPACE (zsh)
-    // keeps tab/folder-navigation cds out of the user's shell history.
-    let cmd = format!("\u{15} cd -- {escaped}\n\u{0c}");
-    terminal.feed_child(cmd.as_bytes());
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let name = Path::new(&shell)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("bash");
+    // Ctrl-U clears typed input; Ctrl-L (\u{0c}) clears the screen like the keybind.
+    match name {
+        "zsh" => format!("\u{15} cd -- {escaped}\n\u{0c}"),
+        "fish" => format!("\u{15} cd {escaped}\n\u{0c}"),
+        _ => format!(
+            "\u{15} builtin cd -- {escaped} && {{ history -d $(history 1) 2>/dev/null || true; }}\n\u{0c}"
+        ),
+    }
 }
 
 fn shell_single_quote(s: &str) -> String {

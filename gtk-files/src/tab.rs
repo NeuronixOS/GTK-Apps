@@ -4,6 +4,8 @@ use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
 
 use gtk4 as gtk;
 use gtk::gdk;
@@ -13,6 +15,7 @@ use gtk::prelude::*;
 
 use crate::config::Config;
 use crate::dnd;
+use crate::search;
 use crate::sync_status::{self, SyncFileState};
 use crate::thumbnails;
 use crate::util::{
@@ -56,6 +59,8 @@ pub struct FolderTab {
     /// Shared with TreeListModel create_func for nested folders.
     tree_show_hidden: Rc<RefCell<bool>>,
     tree_search_query: Rc<RefCell<String>>,
+    /// Child-directory filters so search/hidden updates re-evaluate expanded rows.
+    child_filters: Rc<RefCell<Vec<gtk::CustomFilter>>>,
     tree_sort_by: Rc<RefCell<String>>,
     tree_sort_folders_first: Rc<RefCell<bool>>,
     tree_sort_reversed: Rc<RefCell<bool>>,
@@ -64,6 +69,11 @@ pub struct FolderTab {
     on_context: Rc<RefCell<Option<Rc<dyn Fn(Option<Vec<PathBuf>>, gtk::Widget, f64, f64)>>>>,
     /// Ghost FileInfo rows for deleted sync paths (when Show deleted is on).
     ghost_store: gio::ListStore,
+    /// Recursive filename search hits (flat list under the browse models).
+    search_store: gio::ListStore,
+    /// Non-zero query → browsing list is hidden; only search_store shows.
+    searching: Cell<bool>,
+    search_gen: Arc<AtomicU64>,
     show_deleted: RefCell<bool>,
     /// Keeps FlattenListModel's parent list alive.
     _model_list: gio::ListStore,
@@ -76,30 +86,48 @@ impl FolderTab {
         let directory = gtk::DirectoryList::new(Some(FILE_ATTRIBUTES), Some(&start_file));
         directory.set_monitored(true);
 
-        let filter = gtk::CustomFilter::new(|_| true);
+        let show_hidden_rc = Rc::new(RefCell::new(config.view.show_hidden));
+        let search_query_rc = Rc::new(RefCell::new(String::new()));
+        let child_filters: Rc<RefCell<Vec<gtk::CustomFilter>>> = Rc::new(RefCell::new(Vec::new()));
+        let sort_by_rc = Rc::new(RefCell::new(config.view.sort_by.clone()));
+        let sort_folders_first_rc = Rc::new(RefCell::new(config.view.sort_folders_first));
+        let sort_reversed_rc = Rc::new(RefCell::new(config.view.sort_reversed));
+
+        let filter = {
+            let show_hidden = Rc::clone(&show_hidden_rc);
+            let query = Rc::clone(&search_query_rc);
+            // When recursive search is active the directory listing is hidden
+            // (results live in search_store). The `searching` flag is set on the
+            // tab after construction — filter reads query emptiness as a stand-in
+            // until then; reinstall_filter refreshes when searching flips.
+            gtk::CustomFilter::new(move |obj| {
+                let q = query.borrow();
+                // Non-empty query → hide directory listing (search_store shows hits).
+                if !q.trim().is_empty() {
+                    return false;
+                }
+                file_info_visible(obj, *show_hidden.borrow(), "")
+            })
+        };
         let filter_model = gtk::FilterListModel::new(Some(directory.clone()), Some(filter.clone()));
 
         let ghost_store = gio::ListStore::new::<gio::FileInfo>();
+        let search_store = gio::ListStore::new::<gio::FileInfo>();
         let model_list = gio::ListStore::with_type(gio::ListModel::static_type());
         model_list.append(&filter_model);
         model_list.append(&ghost_store);
+        model_list.append(&search_store);
         let flattened = gtk::FlattenListModel::new(Some(model_list.clone()));
 
         let sorter = gtk::CustomSorter::new(|_a, _b| gtk::Ordering::Equal);
         let flat_model = gtk::SortListModel::new(Some(flattened), Some(sorter.clone()));
 
-        let show_hidden_rc = Rc::new(RefCell::new(config.view.show_hidden));
-        let search_query_rc = Rc::new(RefCell::new(String::new()));
-        let sort_by_rc = Rc::new(RefCell::new(config.view.sort_by.clone()));
-        let sort_folders_first_rc = Rc::new(RefCell::new(config.view.sort_folders_first));
-        let sort_reversed_rc = Rc::new(RefCell::new(config.view.sort_reversed));
-
         let tree_model = {
             let show_hidden = Rc::clone(&show_hidden_rc);
-            let search_query = Rc::clone(&search_query_rc);
             let sort_by = Rc::clone(&sort_by_rc);
             let sort_folders_first = Rc::clone(&sort_folders_first_rc);
             let sort_reversed = Rc::clone(&sort_reversed_rc);
+            let child_filters = Rc::clone(&child_filters);
             gtk::TreeListModel::new(flat_model.clone(), false, false, move |obj| {
                 let Some(info) = obj.downcast_ref::<gio::FileInfo>() else {
                     return None;
@@ -114,11 +142,11 @@ impl FolderTab {
                 let file = file_from_info(info)?;
                 Some(make_child_model(
                     &file,
-                    *show_hidden.borrow(),
-                    search_query.borrow().clone(),
+                    Rc::clone(&show_hidden),
                     sort_by.borrow().clone(),
                     *sort_folders_first.borrow(),
                     *sort_reversed.borrow(),
+                    Rc::clone(&child_filters),
                 ))
             })
         };
@@ -221,6 +249,7 @@ impl FolderTab {
             icon_size,
             tree_show_hidden: show_hidden_rc,
             tree_search_query: search_query_rc,
+            child_filters,
             tree_sort_by: sort_by_rc,
             tree_sort_folders_first: sort_folders_first_rc,
             tree_sort_reversed: sort_reversed_rc,
@@ -228,6 +257,9 @@ impl FolderTab {
             on_location: RefCell::new(None),
             on_context,
             ghost_store,
+            search_store,
+            searching: Cell::new(false),
+            search_gen: Arc::new(AtomicU64::new(0)),
             show_deleted: RefCell::new(false),
             _model_list: model_list,
         });
@@ -337,6 +369,8 @@ impl FolderTab {
         }
         *self.location.borrow_mut() = file.clone();
         *self.title.borrow_mut() = title_for_location(&file);
+        // Leave recursive search results behind when changing folders.
+        self.clear_search();
         thumbnails::bump_generation();
         // Clear then set: TreeListModel can keep showing the previous folder when
         // DirectoryList.set_file is called with only the new location (sidebar
@@ -383,6 +417,10 @@ impl FolderTab {
 
     fn rebuild_sync_ghosts(&self) {
         self.ghost_store.remove_all();
+        // Don't mix tombstones into recursive search results.
+        if self.searching.get() || !self.search_query.borrow().is_empty() {
+            return;
+        }
         if !*self.show_deleted.borrow() {
             return;
         }
@@ -500,9 +538,84 @@ impl FolderTab {
         *self.show_hidden.borrow()
     }
 
-    pub fn set_search_query(&self, q: String) {
+    pub fn set_search_query(self: &Rc<Self>, q: String, on_status: impl Fn(Option<String>) + 'static) {
+        let q = q.trim().to_string();
         *self.search_query.borrow_mut() = q.clone();
-        *self.tree_search_query.borrow_mut() = q;
+        *self.tree_search_query.borrow_mut() = q.clone();
+
+        let gen = self.search_gen.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+        self.search_store.remove_all();
+
+        if q.is_empty() {
+            self.searching.set(false);
+            self.reinstall_filter();
+            on_status(None);
+            self.update_status();
+            return;
+        }
+
+        self.searching.set(true);
+        self.reinstall_filter();
+        on_status(Some("Searching…".into()));
+        self.status.set_text("Searching…");
+
+        let Some(root) = self.location_path() else {
+            on_status(Some("No folder to search".into()));
+            return;
+        };
+        if util::is_trash_location(&self.location.borrow()) {
+            on_status(Some("Search is not available in Trash".into()));
+            self.status.set_text("Search is not available in Trash");
+            return;
+        }
+
+        let show_hidden = *self.show_hidden.borrow();
+        let tab = Rc::clone(self);
+        let on_status = Rc::new(on_status);
+        let root_for_info = root.clone();
+        search::search_names_async(
+            root,
+            q,
+            show_hidden,
+            gen,
+            Arc::clone(&self.search_gen),
+            move |done_gen, hits| {
+                if tab.search_gen.load(AtomicOrdering::Relaxed) != done_gen {
+                    return;
+                }
+                tab.search_store.remove_all();
+                let total = hits.len();
+                for path in hits {
+                    if let Some(info) = search::file_info_for_search_hit(&root_for_info, &path) {
+                        tab.search_store.append(&info);
+                    }
+                }
+                let msg = if total == 0 {
+                    "No matches".to_string()
+                } else if total >= search::MAX_NAME_HITS {
+                    format!("{total}+ matches (truncated)")
+                } else {
+                    format!(
+                        "{total} match{}",
+                        if total == 1 { "" } else { "es" }
+                    )
+                };
+                on_status(Some(msg.clone()));
+                tab.status.set_text(&msg);
+            },
+        );
+    }
+
+    /// Clear recursive search (e.g. when navigating to another folder).
+    pub fn clear_search(&self) {
+        if self.search_query.borrow().is_empty() && !self.searching.get() {
+            return;
+        }
+        self.search_gen.fetch_add(1, AtomicOrdering::Relaxed);
+        *self.search_query.borrow_mut() = String::new();
+        *self.tree_search_query.borrow_mut() = String::new();
+        self.searching.set(false);
+        self.search_store.remove_all();
         self.reinstall_filter();
         self.update_status();
     }
@@ -674,24 +787,10 @@ impl FolderTab {
     }
 
     fn reinstall_filter(&self) {
-        let show_hidden = *self.show_hidden.borrow();
-        let query = self.search_query.borrow().to_lowercase();
-        self.filter.set_filter_func(move |obj| {
-            let Some(info) = obj.downcast_ref::<gio::FileInfo>() else {
-                return false;
-            };
-            if !show_hidden && is_hidden(info) {
-                return false;
-            }
-            if !query.is_empty() {
-                let name = display_name(info).to_lowercase();
-                if !name.contains(&query) {
-                    return false;
-                }
-            }
-            true
-        });
         self.filter.changed(gtk::FilterChange::Different);
+        for f in self.child_filters.borrow().iter() {
+            f.changed(gtk::FilterChange::Different);
+        }
     }
 
     fn reinstall_sorter(&self) {
@@ -780,33 +879,38 @@ fn attach_empty_context_menu(widget: &impl IsA<gtk::Widget>, tab: &Rc<FolderTab>
     widget.add_controller(gesture);
 }
 
+fn file_info_visible(obj: &glib::Object, show_hidden: bool, query: &str) -> bool {
+    let Some(info) = obj.downcast_ref::<gio::FileInfo>() else {
+        return false;
+    };
+    if !show_hidden && is_hidden(info) {
+        return false;
+    }
+    let q = query.trim().to_lowercase();
+    if !q.is_empty() {
+        let name = display_name(info).to_lowercase();
+        if !name.contains(&q) {
+            return false;
+        }
+    }
+    true
+}
+
 fn make_child_model(
     file: &gio::File,
-    show_hidden: bool,
-    search_query: String,
+    show_hidden: Rc<RefCell<bool>>,
     sort_by: String,
     folders_first: bool,
     reversed: bool,
+    child_filters: Rc<RefCell<Vec<gtk::CustomFilter>>>,
 ) -> gio::ListModel {
     let directory = gtk::DirectoryList::new(Some(FILE_ATTRIBUTES), Some(file));
     directory.set_monitored(true);
 
-    let query = search_query.to_lowercase();
     let filter = gtk::CustomFilter::new(move |obj| {
-        let Some(info) = obj.downcast_ref::<gio::FileInfo>() else {
-            return false;
-        };
-        if !show_hidden && is_hidden(info) {
-            return false;
-        }
-        if !query.is_empty() {
-            let name = display_name(info).to_lowercase();
-            if !name.contains(&query) {
-                return false;
-            }
-        }
-        true
+        file_info_visible(obj, *show_hidden.borrow(), "")
     });
+    child_filters.borrow_mut().push(filter.clone());
     let filter_model = gtk::FilterListModel::new(Some(directory), Some(filter));
 
     let sorter = gtk::CustomSorter::new(move |a, b| {

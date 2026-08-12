@@ -21,7 +21,8 @@ mod search;
 mod terminal;
 
 use std::cell::RefCell;
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gtk4 as gtk;
@@ -36,6 +37,7 @@ const APP_ID: &str = "org.neuronix.GtkTerm";
 fn main() -> glib::ExitCode {
     let app = gtk::Application::builder()
         .application_id(APP_ID)
+        .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
 
     app.connect_startup(|app| {
@@ -43,7 +45,11 @@ fn main() -> glib::ExitCode {
         gtk::Window::set_default_icon_name(gtk_theme::app_icons::TERM);
         install_app_actions(app);
     });
-    app.connect_activate(build_ui);
+    app.connect_command_line(|app, cmdline| {
+        let dir = parse_working_directory(&cmdline.arguments());
+        build_ui(app, dir);
+        0
+    });
 
     // Tab management
     app.set_accels_for_action("win.new-tab", &["<Ctrl><Shift>t"]);
@@ -107,7 +113,7 @@ fn install_app_actions(app: &gtk::Application) {
     let new_window = gio::SimpleAction::new("new-window", None);
     {
         let app = app.clone();
-        new_window.connect_activate(move |_, _| build_ui(&app));
+        new_window.connect_activate(move |_, _| build_ui(&app, None));
     }
     app.add_action(&new_window);
 
@@ -142,7 +148,50 @@ fn show_about(app: &gtk::Application) {
 // Window construction.
 // ---------------------------------------------------------------------------
 
-fn build_ui(app: &gtk::Application) {
+fn parse_working_directory(args: &[OsString]) -> Option<PathBuf> {
+    let mut i = 1;
+    while i < args.len() {
+        let a = args[i].to_string_lossy();
+        if a == "--working-directory" || a == "-w" {
+            if let Some(p) = args.get(i + 1) {
+                let path = PathBuf::from(p);
+                if path.is_dir() {
+                    return Some(path);
+                }
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(rest) = a.strip_prefix("--working-directory=") {
+            let path = PathBuf::from(rest);
+            if path.is_dir() {
+                return Some(path);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+const SPAWN_CWD_KEY: &str = "gtk-term-spawn-cwd";
+
+fn set_window_cwd(window: &gtk::ApplicationWindow, cwd: Option<PathBuf>) {
+    if let Some(dir) = cwd {
+        unsafe {
+            window.set_data(SPAWN_CWD_KEY, dir);
+        }
+    }
+}
+
+fn window_cwd(window: &gtk::ApplicationWindow) -> Option<PathBuf> {
+    unsafe {
+        window
+            .data::<PathBuf>(SPAWN_CWD_KEY)
+            .map(|p| p.as_ref().clone())
+    }
+}
+
+fn build_ui(app: &gtk::Application, cwd: Option<PathBuf>) {
     let cfg = Rc::new(RefCell::new(config::load()));
     let mut state = config::load_state();
     // Prefer prefs grid (columns×rows) over last pixel size so “Initial
@@ -154,6 +203,7 @@ fn build_ui(app: &gtk::Application) {
         state.window_height = h;
     }
     let (window, notebook, zoom_label) = build_window_shell(app, Rc::clone(&cfg), &state, true);
+    set_window_cwd(&window, cwd);
 
     create_tab(&window, &notebook, &cfg.borrow());
 
@@ -896,8 +946,9 @@ fn current_terminal(notebook: &gtk::Notebook) -> Option<vte4::Terminal> {
 // Tab management.
 // ---------------------------------------------------------------------------
 
-fn create_tab(window: &gtk::ApplicationWindow, notebook: &gtk::Notebook, config: &Config) {
-    let terminal = terminal::build_terminal(config);
+pub(crate) fn create_tab(window: &gtk::ApplicationWindow, notebook: &gtk::Notebook, config: &Config) {
+    let cwd = window_cwd(window);
+    let terminal = terminal::build_terminal_in(config, cwd.as_deref());
     terminal::apply_profile(&terminal, gtk_theme::load_profile());
 
     let scroller = gtk::ScrolledWindow::builder()

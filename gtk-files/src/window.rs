@@ -104,7 +104,7 @@ impl FilesWindow {
         header.pack_start(&pathbar.root);
 
         let search_btn = gtk::Button::from_icon_name("edit-find-symbolic");
-        search_btn.set_tooltip_text(Some("Search current folder"));
+        search_btn.set_tooltip_text(Some("Search files under this folder"));
         let view_btn = gtk::Button::from_icon_name("view-grid-symbolic");
         view_btn.set_tooltip_text(Some("Toggle list/grid view"));
         let new_folder_btn = gtk::Button::from_icon_name("folder-new-symbolic");
@@ -375,7 +375,10 @@ impl FilesWindow {
         {
             let fw2 = Rc::clone(&fw);
             search.set_on_changed(move |q| {
-                fw2.current_tab().set_search_query(q);
+                let bar = Rc::clone(&fw2.search);
+                fw2.current_tab().set_search_query(q, move |msg| {
+                    bar.set_status(msg.as_deref());
+                });
             });
         }
         {
@@ -547,6 +550,8 @@ impl FilesWindow {
                 back.set_sensitive(tab_ref.can_back());
                 forward.set_sensitive(tab_ref.can_forward());
                 fw.update_trash_chrome(util::is_trash_location(&file));
+                // Folder changed — drop any recursive search UI state.
+                fw.search.clear_query();
             });
         }
 
@@ -836,6 +841,9 @@ impl FilesWindow {
             fw.pathbar.show_entry();
         });
         bind(win, "open-folder", self, |fw, _, _| fw.action_open_folder());
+        bind(win, "new-terminal", self, |fw, _, _| {
+            fw.action_new_terminal();
+        });
         bind(win, "search", self, |fw, _, _| {
             fw.search.toggle();
         });
@@ -1386,6 +1394,18 @@ impl FilesWindow {
         file_ops::delete_permanent(Some(&self.window), &paths, confirm, move || tab.refresh());
     }
 
+    fn action_new_terminal(&self) {
+        // Always the folder currently shown in the tab (right-click context is
+        // for the view you're in — not a selected child unless it's empty trash).
+        let dir = self
+            .current_tab()
+            .location_path()
+            .unwrap_or_else(util::home_dir);
+        if let Err(e) = util::open_terminal_here(&dir) {
+            show_error(Some(&self.window), "Could not open terminal", &e);
+        }
+    }
+
     fn action_open_folder(&self) {
         let parent = self.window.clone();
         let tab = self.current_tab();
@@ -1808,6 +1828,11 @@ fn install_clipboard_shortcuts(fw: &Rc<FilesWindow>) {
         if !(ctrl && !shift) {
             return glib::Propagation::Proceed;
         }
+        // VTE swallows app accels while focused — still open folder search.
+        if matches!(keyval, gdk::Key::f | gdk::Key::F) {
+            fw_keys.search.toggle();
+            return glib::Propagation::Stop;
+        }
         if !matches!(
             keyval,
             gdk::Key::c
@@ -1988,6 +2013,7 @@ fn build_app_menu() -> (gio::Menu, gtk_theme::IconMenu) {
     icons.append_action(&file, "New Document", "win.new-file");
     icons.append_action(&file, "Open Folder…", "win.open-folder");
     icons.append_action(&file, "Open With...", "win.open-with");
+    icons.append_action(&file, "New Terminal Here", "win.new-terminal");
     icons.append_action(&file, "Empty Trash…", "win.empty-trash");
     icons.append_action(&file, "Close Tab", "win.close-tab");
     menu.append_submenu(Some("_File"), &file);
@@ -2081,6 +2107,7 @@ fn show_context_menu(
             "Open in New Tab / Default App"
         };
         icons.append_action(&open, open_tab_label, "win.open-in-tab");
+        icons.append_action(&open, "New Terminal Here", "win.new-terminal");
         menu.append_section(None, &open);
 
         let edit = gio::Menu::new();
@@ -2155,6 +2182,7 @@ fn show_context_menu(
     } else {
         icons.append_action(&menu, "New Folder...", "win.new-folder");
         append_create_new_file_menu(&menu, &mut icons);
+        icons.append_action(&menu, "New Terminal Here", "win.new-terminal");
         icons.append_action(&menu, "Paste", "win.paste");
         icons.append_action(&menu, "Select All", "win.select-all");
         icons.append_action(&menu, "Properties", "win.properties");
