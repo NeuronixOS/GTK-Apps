@@ -155,6 +155,11 @@ fn open_locations(fw: &Rc<FilesWindow>, files: &[gio::File]) {
         } else {
             fw.add_tab(Some(target));
         }
+        if let Some(path) = file.path() {
+            if path.is_file() {
+                fw.current_tab().reveal_path(&path);
+            }
+        }
     }
 }
 

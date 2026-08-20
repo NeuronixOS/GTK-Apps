@@ -51,7 +51,8 @@ pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf, String> {
         return Ok(path.to_path_buf());
     }
 
-    if dest.exists() {
+    // symlink_metadata: treat dangling links as taken (Path::exists follows).
+    if name_in_use(&dest) {
         return Err(format!("“{new_name}” already exists"));
     }
 
@@ -59,13 +60,19 @@ pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf, String> {
     // (std::fs::rename replaces the destination, which then confuses the
     // directory model and can crash the UI).
     rename_no_replace(path, &dest).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
+        if e.kind() == std::io::ErrorKind::AlreadyExists
+            || e.raw_os_error() == Some(libc::EEXIST)
+        {
             format!("“{new_name}” already exists")
         } else {
             e.to_string()
         }
     })?;
     Ok(dest)
+}
+
+fn name_in_use(path: &Path) -> bool {
+    path.symlink_metadata().is_ok()
 }
 
 fn paths_same_file(a: &Path, b: &Path) -> bool {
@@ -118,7 +125,7 @@ fn rename_no_replace(src: &Path, dest: &Path) -> std::io::Result<()> {
         // Fall back only when renameat2 is unavailable; still never call
         // plain rename if the destination exists.
         if err.raw_os_error() == Some(libc::ENOSYS) {
-            if dest.exists() {
+            if name_in_use(dest) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::AlreadyExists,
                     "destination exists",
@@ -126,11 +133,17 @@ fn rename_no_replace(src: &Path, dest: &Path) -> std::io::Result<()> {
             }
             return std::fs::rename(src, dest);
         }
+        if err.raw_os_error() == Some(libc::EEXIST) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "destination exists",
+            ));
+        }
         return Err(err);
     }
     #[cfg(not(target_os = "linux"))]
     {
-        if dest.exists() {
+        if name_in_use(dest) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 "destination exists",

@@ -427,6 +427,20 @@ fn present_context_menu(
             group.add_action(&open);
             icons.append_action(&menu, "Open", "fb.open");
         }
+        {
+            let p = path.clone();
+            let reveal = gio::SimpleAction::new("open-item-location", None);
+            reveal.connect_activate(move |_, _| {
+                crate::io::reveal_in_files(&p);
+            });
+            group.add_action(&reveal);
+            icons.append(
+                &menu,
+                "Open Item Location",
+                "fb.open-item-location",
+                "folder-symbolic",
+            );
+        }
 
         let edit = gio::Menu::new();
         {

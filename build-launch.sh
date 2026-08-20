@@ -1,17 +1,46 @@
 #!/usr/bin/env bash
-# Stop, rebuild (compiled apps only), sync to Neuronix/KvNix, and relaunch GTK-Apps.
+# Stop, rebuild (compiled apps only), install/sync, and relaunch GTK-Apps.
+#
+# Works from any checkout of this directory (home, Dropbox, …). Paths are
+# resolved from this script's location, not a hardcoded Dropbox prefix.
 #
 # Usage:
 #   ./build-launch.sh                         # all apps
 #   ./build-launch.sh gtk-files               # one app
 #   ./build-launch.sh gtk-files gtk-meetings
+#   ./build-launch.sh --linuxos /path/to/LinuxOS
+#   ./build-launch.sh --local gtk-files       # also install into /usr/local
 #
 # Rust apps (Cargo.toml): cargo build --release, then run the binary.
 # Python / script apps: skip build; run via launch/start/run.sh or python entrypoint.
-# After each rebuild, runs ./syn-to-devices.sh (Neuronix + KvNix gtk-apps trees).
+# After each rebuild, runs ./syn-to-devices.sh:
+#   - LinuxOS tree when found or given via --linuxos / LINUXOS_ROOT
+#   - local Neuronix prefix when /usr/local/lib/neuronix/gtk-apps exists (or --local)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  cat <<'EOF'
+Usage: build-launch.sh [options] [app...]
+
+Stop, rebuild, sync/install, and relaunch GTK-Apps. With no app names, all
+suite apps are rebuilt. This script may live anywhere — it uses its own
+directory as the source tree.
+
+Options:
+  --linuxos DIR, -L DIR   LinuxOS repo root for syn-to-devices.sh
+  --save-linuxos          remember DIR in ~/.config/gtk-apps/linuxos-root
+  --no-sync               do not copy into a LinuxOS tree
+  --local                 install into /usr/local/lib/neuronix/gtk-apps
+  --no-local              skip local install even if the prefix exists
+  --no-launch             rebuild/sync only; do not relaunch apps
+  -h, --help              show this help
+
+Apps: gtk-calc gtk-edit gtk-files gtk-image gtk-term gtk-theme-editor
+      gtk-meetings gtk-workspaces gtk-worktimezone gtk-photos gtk-colors
+EOF
+}
 
 # Ensure cargo is on PATH when launched from a minimal shell.
 if ! command -v cargo >/dev/null 2>&1; then
@@ -218,8 +247,8 @@ setup_pkg_config() {
   fi
 }
 
-# Dropbox often sets +i (immutable) on cargo outputs under the synced tree,
-# which makes incremental builds / linking fail with "Permission denied".
+# Synced folders (Dropbox and similar) often set +i (immutable) on cargo
+# outputs, which makes incremental builds / linking fail with "Permission denied".
 make_mutable() {
   local path=$1
   [[ -e "$path" ]] || return 0
@@ -252,7 +281,7 @@ make_cargo_targets_mutable() {
     if [[ -n "$target" && "$target" != "$dir/target" ]]; then
       make_mutable "$target"
     fi
-    # Common out-of-Dropbox dirs used by this suite.
+    # Common out-of-tree cargo dirs used by this suite.
     make_mutable "/tmp/${app}-target"
   done
 }
@@ -419,20 +448,110 @@ sync_to_devices() {
     echo "==> warn: missing or non-executable $sync (skipping sync)" >&2
     return 0
   fi
-  echo "==> Syncing built apps to Neuronix / KvNix (syn-to-devices.sh)..."
-  "$sync"
+  if ((${#SYNC_ARGS[@]})); then
+    echo "==> Syncing built apps (syn-to-devices.sh ${SYNC_ARGS[*]})..."
+    "$sync" "${SYNC_ARGS[@]}"
+  else
+    echo "==> Syncing built apps (syn-to-devices.sh)..."
+    "$sync"
+  fi
 }
 
-resolve_apps "$@"
+LINUXOS_ARG=""
+SAVE_LINUXOS=0
+NO_SYNC=0
+FORCE_LOCAL=0
+NO_LOCAL=0
+NO_LAUNCH=0
+APP_ARGS=()
+SYNC_ARGS=()
+
+while (($#)); do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --linuxos|--linuxos-root|-L)
+      [[ $# -ge 2 ]] || { echo "build-launch: $1 requires a directory" >&2; exit 1; }
+      LINUXOS_ARG="$2"
+      shift 2
+      ;;
+    --linuxos=*)
+      LINUXOS_ARG="${1#--linuxos=}"
+      shift
+      ;;
+    --save-linuxos)
+      SAVE_LINUXOS=1
+      shift
+      ;;
+    --no-sync|--no-linuxos)
+      NO_SYNC=1
+      shift
+      ;;
+    --local)
+      FORCE_LOCAL=1
+      shift
+      ;;
+    --no-local)
+      NO_LOCAL=1
+      shift
+      ;;
+    --no-launch)
+      NO_LAUNCH=1
+      shift
+      ;;
+    --)
+      shift
+      APP_ARGS+=("$@")
+      break
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      APP_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [[ -n "$LINUXOS_ARG" ]]; then
+  SYNC_ARGS+=(--linuxos "$LINUXOS_ARG")
+fi
+((SAVE_LINUXOS)) && SYNC_ARGS+=(--save-linuxos)
+((NO_SYNC)) && SYNC_ARGS+=(--no-linuxos)
+((FORCE_LOCAL)) && SYNC_ARGS+=(--local)
+((NO_LOCAL)) && SYNC_ARGS+=(--no-local)
+
+if ((${#APP_ARGS[@]})); then
+  resolve_apps "${APP_ARGS[@]}"
+else
+  resolve_apps
+fi
 setup_pkg_config
 stop_apps
 make_cargo_targets_mutable
 build_apps
-sync_to_devices
-launch_apps
+if ((NO_SYNC)) && ((NO_LOCAL)) && ! ((FORCE_LOCAL)); then
+  echo "==> Skipping sync (--no-sync and --no-local)"
+else
+  sync_to_devices
+fi
+if ((NO_LAUNCH)); then
+  echo "==> Skipping launch (--no-launch)"
+else
+  launch_apps
+fi
 
 if ((${#FAILED_APPS[@]} > 0)); then
   echo "==> Done with failures: ${FAILED_APPS[*]}" >&2
   exit 1
 fi
-echo "==> Done. Running: ${READY_APPS[*]}"
+if ((NO_LAUNCH)); then
+  echo "==> Done. Built: ${READY_APPS[*]}"
+else
+  echo "==> Done. Running: ${READY_APPS[*]}"
+fi

@@ -310,6 +310,7 @@ pub fn icon_for_action(action: &str) -> &'static str {
         "open" | "open-folder" | "open-with" | "open-in-tab" | "open-tab" | "open-window" => {
             "document-open-symbolic"
         }
+        "open-item-location" | "show-in-folder" => "folder-symbolic",
         "open-recent" | "history" => "document-open-recent-symbolic",
         "save" => "document-save-symbolic",
         "save-as" => "document-save-as-symbolic",
@@ -407,7 +408,7 @@ pub fn icon_for_label(label: &str) -> &'static str {
         }
         "cancel" | "close" => "window-close-symbolic",
         "browse" => "folder-symbolic",
-        "show in folder" | "reveal" => "folder-symbolic",
+        "show in folder" | "reveal" | "open item location" => "folder-symbolic",
         "find" | "replace" | "replace all" => "edit-find-replace-symbolic",
         _ => "emblem-system-symbolic",
     }

@@ -460,6 +460,8 @@ impl FilesWindow {
                 }
                 let tab = fw2.current_tab();
                 c.view.show_hidden = tab.show_hidden();
+                c.view.sort_by = tab.sort_by();
+                c.view.sort_reversed = tab.sort_reversed();
                 c.view.icon_size = tab.icon_size();
                 c.view.thumbnail_size =
                     crate::config::thumbnail_name_for_pixels(tab.icon_size()).into();
@@ -567,6 +569,15 @@ impl FilesWindow {
             let fw = Rc::clone(self);
             tab.set_on_context(move |selection, anchor, x, y| {
                 show_context_menu(&fw, &anchor, selection, x, y);
+            });
+        }
+
+        {
+            let fw = Rc::clone(self);
+            tab.set_on_sort(move |key, reversed| {
+                let mut c = fw.config.borrow_mut();
+                c.view.sort_by = key;
+                c.view.sort_reversed = reversed;
             });
         }
 
@@ -918,6 +929,9 @@ impl FilesWindow {
         bind(win, "properties", self, |fw, _, _| fw.action_properties());
         bind(win, "open", self, |fw, _, _| fw.action_open());
         bind(win, "open-with", self, |fw, _, _| fw.action_open_with());
+        bind(win, "open-item-location", self, |fw, _, _| {
+            fw.action_open_item_location();
+        });
         for format in [
             ConvertFormat::Jpeg,
             ConvertFormat::Png,
@@ -1490,10 +1504,40 @@ impl FilesWindow {
 
     fn action_open_with(&self) {
         let paths = self.target_paths();
+        let files: Vec<PathBuf> = paths.into_iter().filter(|p| p.is_file()).collect();
+        if files.is_empty() {
+            return;
+        }
+        open_with::show_open_with(Some(&self.window), &files);
+    }
+
+    /// Navigate to each item's parent folder and select it (search hits, nested rows).
+    fn action_open_item_location(self: &Rc<Self>) {
+        let paths = self.target_paths();
         if paths.is_empty() {
             return;
         }
-        open_with::show_open_with(Some(&self.window), &paths);
+        let mut by_parent: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
+        for path in paths {
+            let Some(parent) = path.parent().map(Path::to_path_buf) else {
+                continue;
+            };
+            if let Some((_, items)) = by_parent.iter_mut().find(|(p, _)| *p == parent) {
+                items.push(path);
+            } else {
+                by_parent.push((parent, vec![path]));
+            }
+        }
+        for (i, (parent, items)) in by_parent.into_iter().enumerate() {
+            let tab = if i == 0 {
+                self.current_tab()
+            } else {
+                self.add_tab(Some(gio::File::for_path(&parent)))
+            };
+            if let Some(first) = items.first() {
+                tab.reveal_path(first);
+            }
+        }
     }
 
     fn action_convert(&self, format: ConvertFormat) {
@@ -1617,12 +1661,13 @@ impl FilesWindow {
                         });
                     }
                     Err(e) => {
+                        // Never refresh on failure — DirectoryList can crash if a
+                        // colliding name was applied to the model.
                         error.set_text(&e);
                         error.set_visible(true);
                         entry.add_css_class("error");
                         entry.grab_focus();
                         entry.select_region(0, -1);
-                        // Put state back so the user can fix the name and retry.
                         *rename_once.borrow_mut() =
                             Some((path, entry, dialog, error, tab));
                     }
@@ -2013,6 +2058,7 @@ fn build_app_menu() -> (gio::Menu, gtk_theme::IconMenu) {
     icons.append_action(&file, "New Document", "win.new-file");
     icons.append_action(&file, "Open Folder…", "win.open-folder");
     icons.append_action(&file, "Open With...", "win.open-with");
+    icons.append_action(&file, "Open Item Location", "win.open-item-location");
     icons.append_action(&file, "New Terminal Here", "win.new-terminal");
     icons.append_action(&file, "Empty Trash…", "win.empty-trash");
     icons.append_action(&file, "Close Tab", "win.close-tab");
@@ -2094,19 +2140,21 @@ fn show_context_menu(
     if let Some(paths) = selection.as_ref() {
         let open = gio::Menu::new();
         icons.append_action(&open, "Open", "win.open");
-        // Show Open With for files (folders keep the item; dialog explains).
-        if paths.iter().any(|p| p.is_file()) || !paths.is_empty() {
+        let all_dirs = paths.iter().all(|p| p.is_dir());
+        let all_files = paths.iter().all(|p| p.is_file());
+        // Open With is for files only — folders use Open / Open in New Tab.
+        if all_files && !paths.is_empty() {
             icons.append_action(&open, "Open With...", "win.open-with");
         }
-        // Folders → new tab; files → MIME default app (same action).
-        let open_tab_label = if paths.iter().all(|p| p.is_dir()) {
-            "Open in New Tab"
-        } else if paths.iter().all(|p| p.is_file()) {
-            "Open with Default Application"
+        if all_dirs {
+            icons.append_action(&open, "Open in New Tab", "win.open-in-tab");
+        } else if all_files {
+            icons.append_action(&open, "Open with Default Application", "win.open-in-tab");
         } else {
-            "Open in New Tab / Default App"
-        };
-        icons.append_action(&open, open_tab_label, "win.open-in-tab");
+            // Mixed files + folders: open folders in tabs and files with the default app.
+            icons.append_action(&open, "Open in New Tab / Default App", "win.open-in-tab");
+        }
+        icons.append_action(&open, "Open Item Location", "win.open-item-location");
         icons.append_action(&open, "New Terminal Here", "win.new-terminal");
         menu.append_section(None, &open);
 

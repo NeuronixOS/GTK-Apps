@@ -61,12 +61,17 @@ pub struct FolderTab {
     tree_search_query: Rc<RefCell<String>>,
     /// Child-directory filters so search/hidden updates re-evaluate expanded rows.
     child_filters: Rc<RefCell<Vec<gtk::CustomFilter>>>,
+    /// Child-directory sorters so header / menu sort updates expanded folders.
+    child_sorters: Rc<RefCell<Vec<gtk::CustomSorter>>>,
     tree_sort_by: Rc<RefCell<String>>,
     tree_sort_folders_first: Rc<RefCell<bool>>,
     tree_sort_reversed: Rc<RefCell<bool>>,
+    /// True while we sync ColumnView header arrows from code (not a user click).
+    sort_header_guard: Rc<Cell<bool>>,
     on_open: Rc<RefCell<Option<Rc<dyn Fn(gio::File, bool)>>>>,
     on_location: RefCell<Option<Rc<dyn Fn(gio::File)>>>,
     on_context: Rc<RefCell<Option<Rc<dyn Fn(Option<Vec<PathBuf>>, gtk::Widget, f64, f64)>>>>,
+    on_sort: Rc<RefCell<Option<Rc<dyn Fn(String, bool)>>>>,
     /// Ghost FileInfo rows for deleted sync paths (when Show deleted is on).
     ghost_store: gio::ListStore,
     /// Recursive filename search hits (flat list under the browse models).
@@ -89,6 +94,7 @@ impl FolderTab {
         let show_hidden_rc = Rc::new(RefCell::new(config.view.show_hidden));
         let search_query_rc = Rc::new(RefCell::new(String::new()));
         let child_filters: Rc<RefCell<Vec<gtk::CustomFilter>>> = Rc::new(RefCell::new(Vec::new()));
+        let child_sorters: Rc<RefCell<Vec<gtk::CustomSorter>>> = Rc::new(RefCell::new(Vec::new()));
         let sort_by_rc = Rc::new(RefCell::new(config.view.sort_by.clone()));
         let sort_folders_first_rc = Rc::new(RefCell::new(config.view.sort_folders_first));
         let sort_reversed_rc = Rc::new(RefCell::new(config.view.sort_reversed));
@@ -128,6 +134,7 @@ impl FolderTab {
             let sort_folders_first = Rc::clone(&sort_folders_first_rc);
             let sort_reversed = Rc::clone(&sort_reversed_rc);
             let child_filters = Rc::clone(&child_filters);
+            let child_sorters = Rc::clone(&child_sorters);
             gtk::TreeListModel::new(flat_model.clone(), false, false, move |obj| {
                 let Some(info) = obj.downcast_ref::<gio::FileInfo>() else {
                     return None;
@@ -143,10 +150,11 @@ impl FolderTab {
                 Some(make_child_model(
                     &file,
                     Rc::clone(&show_hidden),
-                    sort_by.borrow().clone(),
-                    *sort_folders_first.borrow(),
-                    *sort_reversed.borrow(),
+                    Rc::clone(&sort_by),
+                    Rc::clone(&sort_folders_first),
+                    Rc::clone(&sort_reversed),
                     Rc::clone(&child_filters),
+                    Rc::clone(&child_sorters),
                 ))
             })
         };
@@ -250,12 +258,15 @@ impl FolderTab {
             tree_show_hidden: show_hidden_rc,
             tree_search_query: search_query_rc,
             child_filters,
+            child_sorters,
             tree_sort_by: sort_by_rc,
             tree_sort_folders_first: sort_folders_first_rc,
             tree_sort_reversed: sort_reversed_rc,
+            sort_header_guard: Rc::new(Cell::new(false)),
             on_open,
             on_location: RefCell::new(None),
             on_context,
+            on_sort: Rc::new(RefCell::new(None)),
             ghost_store,
             search_store,
             searching: Cell::new(false),
@@ -266,6 +277,33 @@ impl FolderTab {
 
         tab.reinstall_filter();
         tab.reinstall_sorter();
+        attach_column_header_sorters(&tab.list_view);
+        tab.sync_sort_headers();
+        {
+            let tab2 = Rc::clone(&tab);
+            if let Some(sorter) = tab.list_view.sorter() {
+                sorter.connect_changed(move |s, _| {
+                    if tab2.sort_header_guard.get() {
+                        return;
+                    }
+                    let Some(cvs) = s.downcast_ref::<gtk::ColumnViewSorter>() else {
+                        return;
+                    };
+                    let Some(col) = cvs.primary_sort_column() else {
+                        return;
+                    };
+                    let Some(title) = col.title() else {
+                        return;
+                    };
+                    let Some(key) = sort_key_from_column_title(&title) else {
+                        return;
+                    };
+                    let reversed = cvs.primary_sort_order() == gtk::SortType::Descending;
+                    let folders = *tab2.sort_folders_first.borrow();
+                    tab2.apply_sort(key, folders, reversed, false);
+                });
+            }
+        }
         // Clicks are wired per-row in the factories; keep activate as Enter-key backup.
         tab.bind_activation();
         tab.bind_selection_changed();
@@ -330,6 +368,10 @@ impl FolderTab {
 
     pub fn set_on_context<F: Fn(Option<Vec<PathBuf>>, gtk::Widget, f64, f64) + 'static>(&self, f: F) {
         *self.on_context.borrow_mut() = Some(Rc::new(f));
+    }
+
+    pub fn set_on_sort<F: Fn(String, bool) + 'static>(&self, f: F) {
+        *self.on_sort.borrow_mut() = Some(Rc::new(f));
     }
 
     pub fn location(&self) -> gio::File {
@@ -621,6 +663,18 @@ impl FolderTab {
     }
 
     pub fn set_sort(&self, by: &str, folders_first: bool, reversed: bool) {
+        self.apply_sort(by, folders_first, reversed, true);
+    }
+
+    pub fn sort_by(&self) -> String {
+        self.sort_by.borrow().clone()
+    }
+
+    pub fn sort_reversed(&self) -> bool {
+        *self.sort_reversed.borrow()
+    }
+
+    fn apply_sort(&self, by: &str, folders_first: bool, reversed: bool, sync_headers: bool) {
         *self.sort_by.borrow_mut() = by.to_string();
         *self.sort_folders_first.borrow_mut() = folders_first;
         *self.sort_reversed.borrow_mut() = reversed;
@@ -628,6 +682,22 @@ impl FolderTab {
         *self.tree_sort_folders_first.borrow_mut() = folders_first;
         *self.tree_sort_reversed.borrow_mut() = reversed;
         self.reinstall_sorter();
+        if let Some(cb) = self.on_sort.borrow().as_ref() {
+            cb(by.to_string(), reversed);
+        }
+        if sync_headers {
+            self.sync_sort_headers();
+        }
+    }
+
+    fn sync_sort_headers(&self) {
+        self.sort_header_guard.set(true);
+        sync_column_view_sort(
+            &self.list_view,
+            self.sort_by.borrow().as_str(),
+            *self.sort_reversed.borrow(),
+        );
+        self.sort_header_guard.set(false);
     }
 
     pub fn set_icon_size(&self, size: i32) {
@@ -799,6 +869,9 @@ impl FolderTab {
         let reversed = *self.sort_reversed.borrow();
         self.sorter.set_sort_func(move |a, b| compare_infos(a, b, &sort_by, folders_first, reversed));
         self.sorter.changed(gtk::SorterChange::Different);
+        for s in self.child_sorters.borrow().iter() {
+            s.changed(gtk::SorterChange::Different);
+        }
     }
 
     fn bind_activation(&self) {
@@ -899,10 +972,11 @@ fn file_info_visible(obj: &glib::Object, show_hidden: bool, query: &str) -> bool
 fn make_child_model(
     file: &gio::File,
     show_hidden: Rc<RefCell<bool>>,
-    sort_by: String,
-    folders_first: bool,
-    reversed: bool,
+    sort_by: Rc<RefCell<String>>,
+    folders_first: Rc<RefCell<bool>>,
+    reversed: Rc<RefCell<bool>>,
     child_filters: Rc<RefCell<Vec<gtk::CustomFilter>>>,
+    child_sorters: Rc<RefCell<Vec<gtk::CustomSorter>>>,
 ) -> gio::ListModel {
     let directory = gtk::DirectoryList::new(Some(FILE_ATTRIBUTES), Some(file));
     directory.set_monitored(true);
@@ -914,10 +988,68 @@ fn make_child_model(
     let filter_model = gtk::FilterListModel::new(Some(directory), Some(filter));
 
     let sorter = gtk::CustomSorter::new(move |a, b| {
-        compare_infos(a, b, &sort_by, folders_first, reversed)
+        compare_infos(
+            a,
+            b,
+            sort_by.borrow().as_str(),
+            *folders_first.borrow(),
+            *reversed.borrow(),
+        )
     });
+    child_sorters.borrow_mut().push(sorter.clone());
     let sort_model = gtk::SortListModel::new(Some(filter_model), Some(sorter));
     sort_model.upcast()
+}
+
+fn sort_key_from_column_title(title: &str) -> Option<&'static str> {
+    match title {
+        "Name" => Some("name"),
+        "Size" => Some("size"),
+        "Type" => Some("type"),
+        "Modified" => Some("modified"),
+        _ => None,
+    }
+}
+
+fn title_for_sort_key(key: &str) -> &'static str {
+    match key {
+        "size" => "Size",
+        "type" => "Type",
+        "modified" => "Modified",
+        _ => "Name",
+    }
+}
+
+fn attach_column_header_sorters(view: &gtk::ColumnView) {
+    let columns = view.columns();
+    for i in 0..columns.n_items() {
+        let Some(col) = columns.item(i).and_downcast::<gtk::ColumnViewColumn>() else {
+            continue;
+        };
+        let title = col.title().unwrap_or_default();
+        if sort_key_from_column_title(&title).is_some() {
+            col.set_sorter(Some(&gtk::CustomSorter::new(|_, _| gtk::Ordering::Equal)));
+        }
+    }
+}
+
+fn sync_column_view_sort(view: &gtk::ColumnView, by: &str, reversed: bool) {
+    let want = title_for_sort_key(by);
+    let order = if reversed {
+        gtk::SortType::Descending
+    } else {
+        gtk::SortType::Ascending
+    };
+    let columns = view.columns();
+    for i in 0..columns.n_items() {
+        let Some(col) = columns.item(i).and_downcast::<gtk::ColumnViewColumn>() else {
+            continue;
+        };
+        if col.title().as_deref() == Some(want) {
+            view.sort_by_column(Some(&col), order);
+            return;
+        }
+    }
 }
 
 fn compare_infos(

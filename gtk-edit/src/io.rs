@@ -182,6 +182,14 @@ pub fn disk_mtime(doc: &Document) -> Option<SystemTime> {
     fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
+/// True when this document was loaded from a path that is no longer on disk.
+pub fn file_vanished(doc: &Document) -> bool {
+    let Some(path) = doc.path() else {
+        return false;
+    };
+    !path.exists()
+}
+
 pub fn show_io_error(parent: &impl IsA<gtk::Window>, title: &str, message: &str) {
     let dialog = gtk::AlertDialog::builder()
         .modal(true)
@@ -221,4 +229,13 @@ pub fn maybe_autosave(doc: &Rc<Document>, cfg: &EditorConfig) -> bool {
 #[allow(dead_code)]
 pub fn file_mtime(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Open gtk-files on this path (reveals a file in its folder).
+pub fn reveal_in_files(path: &Path) {
+    if std::process::Command::new("gtk-files").arg(path).spawn().is_ok() {
+        return;
+    }
+    let folder = path.parent().unwrap_or(path);
+    let _ = std::process::Command::new("xdg-open").arg(folder).spawn();
 }

@@ -503,6 +503,13 @@ impl EditorWindow {
     }
 
     pub fn close_tab(&self, tab: &Rc<EditorTab>) -> bool {
+        if io::file_vanished(&tab.document) {
+            if tab.document.is_modified() {
+                self.prompt_missing_file_close(tab);
+                return false;
+            }
+            return self.remove_tab(tab);
+        }
         if tab.document.is_modified() {
             // Auto-save when a path exists; otherwise prompt Save As.
             if tab.document.path().is_some() {
@@ -513,7 +520,10 @@ impl EditorWindow {
                 return false;
             }
         }
+        self.remove_tab(tab)
+    }
 
+    fn remove_tab(&self, tab: &Rc<EditorTab>) -> bool {
         // Find the notebook that owns this tab (not only the active group).
         let owner = self.groups.borrow().iter().find(|g| {
             g.tabs
@@ -540,6 +550,40 @@ impl EditorWindow {
         true
     }
 
+    /// File (or its folder) is gone and the buffer is dirty: don't block Close on ENOENT.
+    fn prompt_missing_file_close(&self, tab: &Rc<EditorTab>) {
+        let name = tab.document.title();
+        let dialog = gtk::AlertDialog::builder()
+            .modal(true)
+            .message(format!("“{name}” is no longer on disk"))
+            .detail(
+                "The file or its folder was moved or deleted. Save to a new location, or close without saving.",
+            )
+            .buttons(["Close without Saving", "Cancel", "Save As…"])
+            .cancel_button(1)
+            .default_button(2)
+            .build();
+        let win = self.window.clone();
+        let tab = Rc::clone(tab);
+        dialog.choose(Some(&win.clone()), None::<&gio::Cancellable>, move |res| {
+            let Ok(choice) = res else {
+                return;
+            };
+            let Some(this) = current_from_window(&win) else {
+                return;
+            };
+            match choice {
+                0 => {
+                    let _ = this.remove_tab(&tab);
+                }
+                2 => {
+                    this.save_tab(&tab, true);
+                }
+                _ => {}
+            }
+        });
+    }
+
     pub fn close_all_tabs(&self) -> bool {
         let tabs: Vec<Rc<EditorTab>> = self
             .groups
@@ -548,6 +592,13 @@ impl EditorWindow {
             .flat_map(|g| g.tabs.borrow().clone())
             .collect();
         for tab in tabs {
+            if io::file_vanished(&tab.document) {
+                if tab.document.is_modified() {
+                    self.prompt_missing_file_close(&tab);
+                    return false;
+                }
+                continue;
+            }
             if tab.document.is_modified() {
                 if tab.document.path().is_some() {
                     if !self.save_tab(&tab, false) {
@@ -566,7 +617,7 @@ impl EditorWindow {
         let path = if save_as || tab.document.path().is_none() {
             None
         } else {
-            tab.document.path()
+            tab.document.path().filter(|p| p.exists())
         };
 
         if let Some(path) = path {
@@ -680,11 +731,60 @@ impl EditorWindow {
         self.window
             .set_title(Some(&format!("{} — GTK Edit", tab.document.title())));
 
-        if externally_modified(&tab.document) {
+        if io::file_vanished(&tab.document) {
+            self.statusbar.flash("File no longer exists on disk");
+            self.check_missing_file(&tab);
+        } else if externally_modified(&tab.document) {
             self.statusbar
                 .flash("File changed on disk");
             self.check_external_change(&tab);
         }
+    }
+
+    /// Prompt when the on-disk file (or its folder) disappeared while the tab is open.
+    fn check_missing_file(&self, tab: &Rc<EditorTab>) {
+        if !io::file_vanished(&tab.document) {
+            return;
+        }
+        if tab.document.disk_change_prompt_open.get() {
+            return;
+        }
+        let Some(path) = tab.document.path() else {
+            return;
+        };
+        tab.document.disk_change_prompt_open.set(true);
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+        let dialog = gtk::AlertDialog::builder()
+            .modal(true)
+            .message(format!("“{name}” is no longer on disk"))
+            .detail("The file or its folder was moved or deleted. You can keep editing, save to a new location, or close the tab.")
+            .buttons(["Keep Editing", "Save As…", "Close Tab"])
+            .cancel_button(0)
+            .default_button(0)
+            .build();
+        let win = self.window.clone();
+        let tab = Rc::clone(tab);
+        dialog.choose(Some(&win.clone()), None::<&gio::Cancellable>, move |res| {
+            tab.document.disk_change_prompt_open.set(false);
+            let Ok(choice) = res else {
+                return;
+            };
+            let Some(this) = current_from_window(&win) else {
+                return;
+            };
+            match choice {
+                1 => {
+                    this.save_tab(&tab, true);
+                }
+                2 => {
+                    let _ = this.remove_tab(&tab);
+                }
+                _ => {}
+            }
+        });
     }
 
     /// Prompt Reload / Ignore when the on-disk file is newer than the buffer.
@@ -839,6 +939,7 @@ fn build_menubar(
     icons.append_action(&file, "Open…", "win.open");
     icons.append_action(&file, "Save", "win.save");
     icons.append_action(&file, "Save As…", "win.save-as");
+    icons.append_action(&file, "Open Item Location", "win.open-item-location");
     icons.append_action(&file, "Revert", "win.revert");
     icons.append_action(&file, "Print Preview", "win.print-preview");
     icons.append_action(&file, "Print…", "win.print");
@@ -1084,6 +1185,13 @@ fn install_actions(ew: &Rc<EditorWindow>) {
     add_action(win, ew, "save-as", |ew| {
         if let Some(tab) = ew.current_tab() {
             ew.save_tab(&tab, true);
+        }
+    });
+    add_action(win, ew, "open-item-location", |ew| {
+        if let Some(tab) = ew.current_tab() {
+            if let Some(path) = tab.document.path() {
+                io::reveal_in_files(&path);
+            }
         }
     });
     add_action(win, ew, "revert", |ew| {
@@ -1376,6 +1484,16 @@ fn install_editor_tab_menu(ew: &Rc<EditorWindow>, tab: &Rc<EditorTab>) {
         group.add_action(&close);
     }
     {
+        let tab = Rc::clone(tab);
+        let reveal = gio::SimpleAction::new("open-item-location", None);
+        reveal.connect_activate(move |_, _| {
+            if let Some(path) = tab.document.path() {
+                io::reveal_in_files(&path);
+            }
+        });
+        group.add_action(&reveal);
+    }
+    {
         let ew = Rc::clone(ew);
         let tab = Rc::clone(tab);
         let move_act = gio::SimpleAction::new("new-window", None);
@@ -1393,6 +1511,12 @@ fn install_editor_tab_menu(ew: &Rc<EditorWindow>, tab: &Rc<EditorTab>) {
         "Open in New Window",
         "edtab.new-window",
         "window-new-symbolic",
+    );
+    icons.append(
+        &menu,
+        "Open Item Location",
+        "edtab.open-item-location",
+        "folder-symbolic",
     );
     icons.append(
         &menu,
