@@ -1,6 +1,6 @@
 //! Network / remote mounts (SFTP, FTP, SMB, WebDAV) via GVFS.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -18,21 +18,54 @@ const NETWORK_SCHEMES: &[&str] = &["sftp", "ssh", "ftp", "ftps", "smb", "dav", "
 thread_local! {
     /// Prevents a second Connect dialog when the sidebar fires activate twice.
     static CONNECT_UI_OPEN: Cell<bool> = const { Cell::new(false) };
+    static ACTIVE_CONNECT_DIALOG: RefCell<Option<gtk::Window>> = const { RefCell::new(None) };
 }
 
 fn try_begin_connect_ui() -> bool {
-    CONNECT_UI_OPEN.with(|c| {
-        if c.get() {
-            false
-        } else {
-            c.set(true);
-            true
+    CONNECT_UI_OPEN.with(|open| {
+        if open.get() {
+            return false;
         }
+        open.set(true);
+        true
     })
 }
 
 fn end_connect_ui() {
-    CONNECT_UI_OPEN.with(|c| c.set(false));
+    CONNECT_UI_OPEN.with(|open| open.set(false));
+    ACTIVE_CONNECT_DIALOG.with(|slot| *slot.borrow_mut() = None);
+}
+
+/// Claim the connect UI slot, or raise an existing dialog / clear a stale flag.
+fn claim_connect_ui() -> bool {
+    if try_begin_connect_ui() {
+        return true;
+    }
+    let raised = ACTIVE_CONNECT_DIALOG.with(|slot| {
+        if let Some(dialog) = slot.borrow().as_ref() {
+            dialog.present();
+            true
+        } else {
+            false
+        }
+    });
+    if raised {
+        return false;
+    }
+    // Previous dialog died without clearing the gate — recover.
+    end_connect_ui();
+    try_begin_connect_ui()
+}
+
+fn register_connect_dialog(dialog: &gtk::Window) {
+    ACTIVE_CONNECT_DIALOG.with(|slot| *slot.borrow_mut() = Some(dialog.clone()));
+}
+
+fn row_connection_uri(row: &gtk::ListBoxRow) -> Option<String> {
+    unsafe {
+        row.data::<String>("network-uri")
+            .map(|ptr| ptr.as_ref().clone())
+    }
 }
 
 /// `~/Network` — local shortcuts (symlinks) to mounted remotes.
@@ -84,10 +117,8 @@ pub fn is_network_mount(mount: &gio::Mount) -> bool {
 /// Returns the symlink path when created or already correct.
 pub fn ensure_home_shortcut(mount: &gio::Mount) -> Option<PathBuf> {
     let root = mount.root();
+    // Never call Path::exists() on GVFS — synchronous network I/O on the UI thread.
     let target = root.path()?;
-    if !target.exists() {
-        return None;
-    }
 
     let dir = network_home_dir();
     let _ = std::fs::create_dir_all(&dir);
@@ -210,11 +241,12 @@ pub fn show_connect_dialog(
 }
 
 fn wire_dismissible_dialog(dialog: &gtk::Window, parent: &impl IsA<gtk::Window>) {
+    register_connect_dialog(dialog);
     let header = gtk::HeaderBar::new();
     dialog.set_titlebar(Some(&header));
     dialog.set_destroy_with_parent(true);
     dialog.set_deletable(true);
-    dialog.set_modal(false);
+    dialog.set_modal(true);
     let parent_win = parent.clone().upcast::<gtk::Window>();
     if let Some(app) = parent_win.application() {
         dialog.set_application(Some(&app));
@@ -265,6 +297,10 @@ pub fn show_connect_dialog_prefill(
     on_mounted: Rc<dyn Fn(gio::File)>,
     prefill_uri: Option<&str>,
 ) {
+    if !claim_connect_ui() {
+        return;
+    }
+
     let dialog = gtk::Window::builder()
         .title("Connect to Server")
         .transient_for(parent)
@@ -408,14 +444,14 @@ pub fn show_network_picker(
     parent: &impl IsA<gtk::Window>,
     on_mounted: Rc<dyn Fn(gio::File)>,
 ) {
-    if !try_begin_connect_ui() {
-        return;
-    }
-
     let connections = places::load_network_connections();
     // No saved remotes yet → go straight to the new-connection form.
     if connections.is_empty() {
         show_connect_dialog(parent, on_mounted);
+        return;
+    }
+
+    if !claim_connect_ui() {
         return;
     }
 
@@ -484,13 +520,17 @@ pub fn show_network_picker(
         box_.append(&texts);
         box_.append(&forget);
         row.set_child(Some(&box_));
+        unsafe {
+            row.set_data("network-uri", conn.uri.clone());
+        }
 
         {
             let uri = conn.uri.clone();
             let list = list.clone();
             let row = row.clone();
             let connections = Rc::clone(&connections);
-            forget.connect_clicked(move |_| {
+            forget.connect_clicked(move |btn| {
+                btn.set_sensitive(false);
                 places::forget_network_connection(&uri);
                 connections.borrow_mut().retain(|c| c.uri != uri);
                 list.remove(&row);
@@ -557,33 +597,16 @@ pub fn show_network_picker(
             let parent = parent.clone();
             let on_mounted = Rc::clone(&on_mounted);
             glib::idle_add_local_once(move || {
-                // Picker destroy clears CONNECT_UI_OPEN; claim it again for the form.
-                if try_begin_connect_ui() {
-                    show_connect_dialog(&parent, on_mounted);
-                }
+                end_connect_ui();
+                show_connect_dialog(&parent, on_mounted);
             });
         });
     }
 
-    let row_uri = {
-        let connections = Rc::clone(&connections);
-        move |row: &gtk::ListBoxRow| -> Option<String> {
-            let idx = row.index();
-            if idx < 0 {
-                return None;
-            }
-            connections
-                .borrow()
-                .get(idx as usize)
-                .map(|c| c.uri.clone())
-        }
-    };
-
     {
         let start_connect = Rc::clone(&start_connect);
-        let row_uri = row_uri.clone();
         list.connect_row_activated(move |_, row| {
-            if let Some(uri) = row_uri(row) {
+            if let Some(uri) = row_connection_uri(row) {
                 start_connect(uri);
             }
         });
@@ -593,7 +616,9 @@ pub fn show_network_picker(
         let list = list.clone();
         let status = status.clone();
         connect_btn.connect_clicked(move |_| {
-            let uri = list.selected_row().and_then(|row| row_uri(&row));
+            let uri = list
+                .selected_row()
+                .and_then(|row| row_connection_uri(&row));
             if let Some(uri) = uri {
                 start_connect(uri);
             } else {
@@ -698,8 +723,26 @@ fn finish_connect_inner(
     // Never call find_enclosing_mount() here — it is synchronous and can hang
     // indefinitely on GVFS/SFTP, freezing the UI.
     best_effort_home_link(uri, label);
-    sync_home_shortcuts();
-    on_mounted(gio::File::for_uri(uri));
+    let file = mounted_file_for_uri(uri);
+    let on_mounted = Rc::clone(on_mounted);
+    glib::idle_add_local_once(move || {
+        on_mounted(file);
+    });
+}
+
+/// Prefer the GVFS mount root (listed immediately) over a deep URI path.
+fn mounted_file_for_uri(uri: &str) -> gio::File {
+    for mount in network_mounts() {
+        let root = mount.root();
+        let root_uri = root.uri();
+        if uri == root_uri.as_str()
+            || uri.starts_with(&format!("{root_uri}/"))
+            || root_uri.as_str().starts_with(uri)
+        {
+            return root;
+        }
+    }
+    gio::File::for_uri(uri)
 }
 
 fn best_effort_home_link(uri: &str, _label: &str) {

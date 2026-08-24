@@ -13,7 +13,7 @@ Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/N
 | `python/cursor_worker.py` | Cursor SDK bridge (stdin/stdout JSON) |
 | `examples/credentials.toml` | Template for API keys |
 
-Integrated apps: **gtk-files**, **gtk-term**, **gtk-edit**, **gtk-image**.
+Integrated apps: **gtk-files**, **gtk-term**, **gtk-edit**, **gtk-image**, **gtk-video**.
 
 ## Build
 
@@ -48,7 +48,7 @@ You can also paste a key in the Self Driving panel **Edit** field.
 
 ## Usage
 
-1. Open gtk-files / gtk-term / gtk-edit / gtk-image.
+1. Open gtk-files / gtk-term / gtk-edit / gtk-image / gtk-video.
 2. Click the steering-wheel / **ꔮ** button (or Ctrl+D) to open **Self Driving** (right-hand side panel).
 3. Choose Cursor, Gemini, or Claude; connect a key if needed.
 4. Ask the driver to act (e.g. “list this folder”, “run `ls`”, “rotate the image”).
@@ -61,6 +61,8 @@ You can also paste a key in the Self Driving panel **Edit** field.
 **gtk-term:** `/run-term-command`, `/read-terminal-output`, `/write-terminal`, `/list-tabs`, `/new-tab`
 
 **gtk-image:** `/open-image`, `/get-current-image`, `/rotate`, `/flip`, `/save-image`, `/edit-image`
+
+**gtk-video:** `/open-video`, `/get-current-video`, `/play-pause`, `/seek`, `/set-in`, `/set-out`, `/set-range`, `/rotate`, `/flip`, `/crop`, `/export`
 
 **gtk-edit:** `/open-file`, `/list-tabs`, `/read-buffer`, `/write-buffer`, `/replace-selection`, `/save-file`, `/find`
 

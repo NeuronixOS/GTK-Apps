@@ -10,6 +10,7 @@ Suite of GTK4 desktop apps for Neuronix. Apps share color profiles and UI chrome
 | `gtk-edit` | Rust | Text editor (gedit-style: tabs, GtkSourceView, find/replace, plugins) |
 | `gtk-files` | Rust | File manager (Nautilus-style: places, tabs, list/grid, trash, embedded terminal) |
 | `gtk-image` | Rust | Image viewer (Eye of GNOME–style: browse folder, zoom/rotate, fullscreen) |
+| `gtk-video` | Rust | Video trimmer (in/out on the timeline, crop/rotate/flip, export the selection) |
 | `gtk-term` | Rust | Terminal emulator (GNOME Terminal–style: VTE tabs, search, profiles, URLs) |
 | `gtk-theme-editor` | Rust | Edit suite color profiles (fg/bg + 16-color palette); save custom profiles and apply suite-wide |
 | `gtk-colors` | Python | Color picker and format converter (RGB/Hex and many color spaces, palette harmonies) |
@@ -26,7 +27,7 @@ Shared libraries (not launched as suite windows by default):
 | Path | Role |
 |------|------|
 | `gtk-theme` | Color profiles, Profile menu, Adwaita icon helpers for Rust and Python suite apps |
-| `gtk-neuron` | AI driving daemon (`gtk-neurond`) + client/Driving UI (ꔮ) for files/term/edit/image |
+| `gtk-neuron` | AI driving daemon (`gtk-neurond`) + client/Driving UI (ꔮ) for files/term/edit/image/video |
 
 ## Runtime icons
 

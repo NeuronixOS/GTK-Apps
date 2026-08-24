@@ -37,7 +37,7 @@ Options:
   --no-launch             rebuild/sync only; do not relaunch apps
   -h, --help              show this help
 
-Apps: gtk-calc gtk-edit gtk-files gtk-image gtk-term gtk-theme-editor
+Apps: gtk-calc gtk-edit gtk-files gtk-image gtk-video gtk-term gtk-theme-editor
       gtk-meetings gtk-workspaces gtk-worktimezone gtk-photos gtk-colors
 EOF
 }
@@ -54,6 +54,7 @@ ALL_APPS=(
   gtk-edit
   gtk-files
   gtk-image
+  gtk-video
   gtk-term
   gtk-theme-editor
   gtk-meetings
@@ -104,7 +105,7 @@ app_launch_cmd() {
 app_stop_spec() {
   local app=$1
   case "$app" in
-    gtk-calc | gtk-edit | gtk-files | gtk-image | gtk-term)
+    gtk-calc | gtk-edit | gtk-files | gtk-image | gtk-video | gtk-term)
       echo "exact:$app"
       ;;
     gtk-theme-editor)
@@ -290,7 +291,7 @@ needs_neuron() {
   local app
   for app in "${APPS[@]}"; do
     case "$app" in
-      gtk-edit | gtk-files | gtk-image | gtk-term) return 0 ;;
+      gtk-edit | gtk-files | gtk-image | gtk-term | gtk-video) return 0 ;;
     esac
   done
   return 1

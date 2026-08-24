@@ -982,6 +982,14 @@ pub fn image_drive_context(handler: CapabilityHandler) -> DriveContext {
     }
 }
 
+pub fn video_drive_context(handler: CapabilityHandler) -> DriveContext {
+    DriveContext {
+        app_id: "org.neuronix.GtkVideo".into(),
+        capabilities: capabilities::video_capabilities(),
+        handler,
+    }
+}
+
 pub fn edit_drive_context(handler: CapabilityHandler) -> DriveContext {
     DriveContext {
         app_id: "org.neuronix.GtkEdit".into(),

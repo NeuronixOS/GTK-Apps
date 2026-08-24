@@ -1,0 +1,26 @@
+[package]
+name = "gtk-video"
+version = "0.1.0"
+edition = "2021"
+authors = ["Kevin Hinds <https://github.com/NeuronixOS/GTK-Apps>"]
+description = "A GTK4 video trimmer: load a clip, set in/out points, crop/rotate/flip, export the selection"
+license = "GPL-3.0-or-later"
+readme = "README.md"
+
+[[bin]]
+name = "gtk-video"
+path = "src/main.rs"
+
+[dependencies]
+gtk4 = { version = "0.9", features = ["v4_10"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "5"
+gtk-theme = { path = "../gtk-theme" }
+gtk-neuron = { path = "../gtk-neuron" }
+serde_json = "1"
+
+[profile.release]
+lto = true
+strip = true
+opt-level = "z"

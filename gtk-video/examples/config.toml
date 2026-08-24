@@ -1,0 +1,11 @@
+# ~/.config/gtk-apps/gtk-video/config.toml
+
+# Re-encode the selection so in/out points are frame-accurate.
+# Set false to stream-copy (faster, keyframe-aligned).
+accurate_export = true
+
+# Loop playback inside the selected range.
+loop_selection = false
+
+window_width = 960
+window_height = 640

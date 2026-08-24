@@ -31,6 +31,8 @@ pub mod app_icons {
     /// Eye of GNOME / image viewer; widely shipped under this name.
     pub const IMAGE: &str = "org.gnome.eog";
     pub const TERM: &str = "utilities-terminal";
+    /// Generic video / multimedia player icon, widely shipped.
+    pub const VIDEO: &str = "video-x-generic";
 }
 
 /// Ensure Adwaita icon directories are searched so suite chrome icons resolve
@@ -369,7 +371,12 @@ pub fn icon_for_action(action: &str) -> &'static str {
         // Image / media
         "rotate-left" | "rotate-right" => "object-rotate-left-symbolic",
         "flip-horizontal" | "flip-vertical" => "object-flip-horizontal-symbolic",
-        "slideshow" => "media-playback-start-symbolic",
+        "slideshow" | "play" | "play-pause" => "media-playback-start-symbolic",
+        "pause" => "media-playback-pause-symbolic",
+        "stop" => "media-playback-stop-symbolic",
+        "export" | "export-clip" => "document-save-as-symbolic",
+        "goto-in" | "mark-in" | "jump-start" => "go-first-symbolic",
+        "goto-out" | "mark-out" | "jump-end" => "go-last-symbolic",
         "convert-to-jpeg" | "convert-to-png" | "convert-to-pdf" | "convert-to-webp" => {
             "image-x-generic-symbolic"
         }

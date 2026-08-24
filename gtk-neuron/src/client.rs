@@ -333,13 +333,16 @@ fn install_drive_icon_file() -> Option<std::path::PathBuf> {
     if needs_write {
         std::fs::write(&dest, DRIVE_SVG).ok()?;
     }
-    // Ensure a minimal hicolor index so some desktops pick up scalable/actions.
+    // Never write a user hicolor/index.theme. A stub here shadows the system
+    // hicolor definition in GTK4, so PWA / app icons in 48x48/apps etc. vanish.
+    // The system index already includes scalable/actions; gtk-neuron loads the
+    // drive SVG by file path anyway.
+    const STUB_INDEX: &str = "[Icon Theme]\nName=Hicolor\nComment=Fallback icon theme\nDirectories=scalable/actions\n\n[scalable/actions]\nSize=16\nType=Scalable\nMinSize=1\nMaxSize=256\nContext=Actions\n";
     let index = dirs::data_local_dir()?.join("icons/hicolor/index.theme");
-    if !index.is_file() {
-        let _ = std::fs::write(
-            &index,
-            "[Icon Theme]\nName=Hicolor\nComment=Fallback icon theme\nDirectories=scalable/actions\n\n[scalable/actions]\nSize=16\nType=Scalable\nMinSize=1\nMaxSize=256\nContext=Actions\n",
-        );
+    if let Ok(existing) = std::fs::read_to_string(&index) {
+        if existing == STUB_INDEX {
+            let _ = std::fs::remove_file(&index);
+        }
     }
     Some(dest)
 }

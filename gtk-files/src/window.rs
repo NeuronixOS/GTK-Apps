@@ -707,8 +707,11 @@ impl FilesWindow {
                 let uri = uri.clone();
                 network::mount_and_open(&self.window, &uri, Rc::new(move |file| {
                     fw.current_tab().navigate(file, true);
-                    fw.sidebar.rebuild();
-                    fw.sync_chrome();
+                    let fw2 = Rc::clone(&fw);
+                    glib::idle_add_local_once(move || {
+                        fw2.sidebar.rebuild();
+                        fw2.sync_chrome();
+                    });
                 }));
                 return;
             }
@@ -1259,8 +1262,11 @@ impl FilesWindow {
             &self.window,
             Rc::new(move |file| {
                 fw.current_tab().navigate(file, true);
-                fw.sidebar.rebuild();
-                fw.sync_chrome();
+                let fw2 = Rc::clone(&fw);
+                glib::idle_add_local_once(move || {
+                    fw2.sidebar.rebuild();
+                    fw2.sync_chrome();
+                });
             }),
         );
     }

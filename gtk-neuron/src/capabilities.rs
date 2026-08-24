@@ -142,6 +142,77 @@ pub fn image_capabilities() -> Vec<CapabilitySpec> {
     ]
 }
 
+pub fn video_capabilities() -> Vec<CapabilitySpec> {
+    vec![
+        spec(
+            "/open-video",
+            "Open a video file",
+            json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
+            false,
+        ),
+        spec(
+            "/get-current-video",
+            "Return the current video path, selection, and transform state",
+            json!({"type":"object","properties":{}}),
+            false,
+        ),
+        spec(
+            "/play-pause",
+            "Toggle playback, or set playing true/false",
+            json!({"type":"object","properties":{"playing":{"type":"boolean"}}}),
+            false,
+        ),
+        spec(
+            "/seek",
+            "Seek to a timestamp",
+            json!({"type":"object","properties":{"us":{"type":"integer"},"seconds":{"type":"number"}}}),
+            false,
+        ),
+        spec(
+            "/set-in",
+            "Set the in point to a timestamp (or the playhead)",
+            json!({"type":"object","properties":{"us":{"type":"integer"},"seconds":{"type":"number"}}}),
+            false,
+        ),
+        spec(
+            "/set-out",
+            "Set the out point to a timestamp (or the playhead)",
+            json!({"type":"object","properties":{"us":{"type":"integer"},"seconds":{"type":"number"}}}),
+            false,
+        ),
+        spec(
+            "/set-range",
+            "Set the in/out range",
+            json!({"type":"object","properties":{"start_us":{"type":"integer"},"end_us":{"type":"integer"},"start":{"type":"number"},"end":{"type":"number"}}}),
+            false,
+        ),
+        spec(
+            "/rotate",
+            "Rotate the current video (cw or ccw)",
+            json!({"type":"object","properties":{"direction":{"type":"string","enum":["cw","ccw"]}},"required":["direction"]}),
+            false,
+        ),
+        spec(
+            "/flip",
+            "Flip the current video",
+            json!({"type":"object","properties":{"axis":{"type":"string","enum":["horizontal","vertical"]}},"required":["axis"]}),
+            false,
+        ),
+        spec(
+            "/crop",
+            "Crop by pixel rectangle or preset (16:9, 9:16, 1:1, 4:3, reset)",
+            json!({"type":"object","properties":{"preset":{"type":"string"},"x":{"type":"integer"},"y":{"type":"integer"},"w":{"type":"integer"},"h":{"type":"integer"}}}),
+            false,
+        ),
+        spec(
+            "/export",
+            "Export the selected (and transformed) range to a path",
+            json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
+            true,
+        ),
+    ]
+}
+
 pub fn edit_capabilities() -> Vec<CapabilitySpec> {
     vec![
         spec(
@@ -201,6 +272,9 @@ pub fn starter_help(app_id: &str) -> &'static str {
         "org.neuronix.GtkImage" => {
             "Try asking to open an image, rotate or flip it, save a copy, or tell you which image is open."
         }
+        "org.neuronix.GtkVideo" => {
+            "Try asking to open a video, play or pause, set in/out points, crop or rotate, or export a clip."
+        }
         "org.neuronix.GtkEdit" => {
             "Try asking to open a file, list tabs, read or rewrite the buffer, replace the selection, find text, or save."
         }
@@ -213,6 +287,7 @@ pub fn app_display_name(app_id: &str) -> &'static str {
         "org.neuronix.GtkFiles" => "GTK Files",
         "org.neuronix.GtkTerm" => "GTK Term",
         "org.neuronix.GtkImage" => "GTK Image",
+        "org.neuronix.GtkVideo" => "GTK Video",
         "org.neuronix.GtkEdit" => "GTK Edit",
         _ => "this app",
     }
