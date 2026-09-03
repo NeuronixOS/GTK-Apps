@@ -20,7 +20,7 @@ use crate::sync_status::{self, SyncFileState};
 use crate::thumbnails;
 use crate::util::{
     self, can_write, content_type_description, display_name, format_mtime, format_size,
-    icon_for_info, is_directory, is_hidden, title_for_location, FILE_ATTRIBUTES,
+    icon_for_info, is_directory, is_hidden, is_symlink, title_for_location, FILE_ATTRIBUTES,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1227,7 +1227,7 @@ fn overlay_badge(overlay: &gtk::Overlay, css_class: &str) -> Option<gtk::Image> 
 
 /// Show the symlink emblem for links; hide it otherwise (widgets are recycled).
 fn apply_symlink_emblem(emblem: &gtk::Image, info: &gio::FileInfo) {
-    if info.is_symlink() {
+    if is_symlink(info) {
         emblem.set_icon_name(Some("emblem-symbolic-link"));
         emblem.set_visible(true);
     } else {
@@ -1248,7 +1248,7 @@ fn apply_lock_emblem(emblem: &gtk::Image, info: &gio::FileInfo) {
 /// Tooltip for symlink and/or read-only; clear when neither applies (recycled rows).
 fn apply_item_tooltip(widget: &impl IsA<gtk::Widget>, info: &gio::FileInfo) {
     let mut parts: Vec<String> = Vec::new();
-    if info.is_symlink() {
+    if is_symlink(info) {
         let target = info.symlink_target().map(|p| p.display().to_string());
         parts.push(match target {
             Some(t) if !t.is_empty() => format!("Symbolic link → {t}"),
@@ -1852,7 +1852,7 @@ fn append_info_columns(view: &gtk::ColumnView) {
             };
             let label = item.child().and_downcast::<gtk::Label>().unwrap();
             let mut text = content_type_description(&info);
-            if info.is_symlink() {
+            if is_symlink(&info) {
                 text.push_str(" (link)");
             }
             label.set_text(&text);

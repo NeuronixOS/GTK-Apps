@@ -237,8 +237,10 @@ impl PathBar {
             v
         };
 
+        let on_nav = self.on_navigate.borrow().clone();
         let on_tab = self.on_open_tab.borrow().clone();
         let on_window = self.on_open_window.borrow().clone();
+        let last_idx = components.len().saturating_sub(1);
 
         for (i, comp) in components.iter().enumerate() {
             let label = if i == 0 && *comp == home {
@@ -252,15 +254,21 @@ impl PathBar {
             };
             let btn = gtk::Button::with_label(&label);
             btn.add_css_class("flat");
-            btn.set_tooltip_text(Some("Open in New Tab (middle-click too)"));
             let path = comp.clone();
+            let tip = path.display().to_string();
+            if i == last_idx {
+                btn.set_tooltip_text(Some(&tip));
+                btn.set_sensitive(false);
+            } else {
+                btn.set_tooltip_text(Some(&format!("Go to {tip} (middle-click: new tab)")));
+            }
 
-            // Primary click → new tab
-            {
-                let on_tab = on_tab.clone();
+            // Primary click → navigate this tab
+            if i != last_idx {
+                let on_nav = on_nav.clone();
                 let path = path.clone();
                 btn.connect_clicked(move |_| {
-                    if let Some(cb) = &on_tab {
+                    if let Some(cb) = &on_nav {
                         cb(path.clone());
                     }
                 });

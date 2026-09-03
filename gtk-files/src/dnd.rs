@@ -1,10 +1,8 @@
 //! Drag-and-drop of files (export + import into folders).
 //!
 //! Cursor / action convention (this app):
-//! - Default drop → **COPY** (plus cursor): add a copy with a unique name
-//! - Hold **Ctrl** → **MOVE** (arrow): relocate; unique name if a clash exists
-//! - Hold **Shift** → **MOVE + replace** (arrow): relocate; ask before clobbering
-//!   existing names (Replace / Skip / apply to the rest)
+//! - Default drop → **MOVE** (arrow): cut to the destination; ask on name clashes
+//! - Hold **Ctrl** → **COPY** (plus cursor): copy instead; ask on name clashes
 //!
 //! On Wayland, `DropTarget::current_event_state()` usually has only the mouse
 //! button during a drag — keyboard modifiers must be read from the seat
@@ -360,31 +358,21 @@ fn drop_modifier_state(
     interesting(mods)
 }
 
-/// Map modifiers → (move_files, overwrite/clobber).
+/// Map modifiers → (move_files, prompt_on_clash).
 ///
-/// - Shift → move + replace existing names (after confirm)
-/// - Ctrl (without Shift) → move, uniquify on clash
-/// - neither → copy, uniquify on clash
+/// - Default → move (cut), ask Replace / Merge / Skip on clash
+/// - Ctrl → copy, ask on clash
 fn drop_intent(state: gdk::ModifierType) -> (bool, bool) {
-    let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
-    let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
-    if shift {
-        (true, true)
-    } else if ctrl {
-        (true, false)
-    } else {
-        (false, false)
-    }
+    let copy = state.contains(gdk::ModifierType::CONTROL_MASK);
+    (!copy, true)
 }
 
-/// Ctrl or Shift → MOVE cursor (arrow); otherwise COPY (+).
+/// Ctrl → COPY cursor (+); otherwise MOVE (arrow).
 fn action_for_state(state: gdk::ModifierType) -> gdk::DragAction {
-    if state.contains(gdk::ModifierType::CONTROL_MASK)
-        || state.contains(gdk::ModifierType::SHIFT_MASK)
-    {
-        gdk::DragAction::MOVE
-    } else {
+    if state.contains(gdk::ModifierType::CONTROL_MASK) {
         gdk::DragAction::COPY
+    } else {
+        gdk::DragAction::MOVE
     }
 }
 

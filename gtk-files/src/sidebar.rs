@@ -433,7 +433,8 @@ impl Sidebar {
                 self.list.append(&row);
             }
 
-            // Mounted drives under /media (PN, MEDIA, USB, …) + unmounted volumes.
+            // Mounted drives under /media (PN, MEDIA, USB, …), phone MTP/PTP,
+            // and unmounted volumes ready to mount.
             let mounted = user_mounted_drives();
             let unmounted = unmounted_volumes();
             self.list.append(&make_header("Mounted Drives"));
@@ -691,7 +692,7 @@ impl Sidebar {
                 .path()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| mount.root().uri().to_string());
-            parts.push(format!("d:{}:{path}", mount.name()));
+            parts.push(format!("d:{}:{path}", mount_display_name(&mount)));
         }
         for vol in unmounted_volumes() {
             parts.push(format!("u:{}", vol.name()));
@@ -742,9 +743,13 @@ impl Sidebar {
     }
 }
 
+/// GVFS phone / camera / portable-device schemes (USB MTP, PTP/gphoto, iOS AFC).
+const DEVICE_SCHEMES: &[&str] = &["mtp", "gphoto", "gphoto2", "afc"];
+
 /// User-facing mounts for the Mounted Drives sidebar section.
-/// Includes `/media` / `/run/media` volumes (PN, MEDIA, USB sticks, …) and
-/// classic removable drives — not the root FS, boot, or snap mounts.
+/// Includes `/media` / `/run/media` volumes (PN, MEDIA, USB sticks, …),
+/// phone MTP / camera PTP mounts under GVFS, and classic removable drives —
+/// not the root FS, boot, or snap mounts.
 fn user_mounted_drives() -> Vec<gio::Mount> {
     let monitor = gio::VolumeMonitor::get();
     let mut mounts: Vec<gio::Mount> = monitor
@@ -753,9 +758,9 @@ fn user_mounted_drives() -> Vec<gio::Mount> {
         .filter(is_user_mounted_drive)
         .collect();
     mounts.sort_by(|a, b| {
-        a.name()
+        mount_display_name(a)
             .to_ascii_lowercase()
-            .cmp(&b.name().to_ascii_lowercase())
+            .cmp(&mount_display_name(b).to_ascii_lowercase())
             .then_with(|| {
                 let pa = a.root().path().unwrap_or_default();
                 let pb = b.root().path().unwrap_or_default();
@@ -765,7 +770,40 @@ fn user_mounted_drives() -> Vec<gio::Mount> {
     mounts
 }
 
+fn mount_uri_scheme(mount: &gio::Mount) -> String {
+    mount
+        .root()
+        .uri_scheme()
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+/// Phone MTP, camera PTP (`gphoto`/`gphoto2`), or iOS AFC mount via GVFS.
+fn is_phone_or_camera_mount(mount: &gio::Mount) -> bool {
+    let scheme = mount_uri_scheme(mount);
+    if DEVICE_SCHEMES.iter().any(|s| *s == scheme) {
+        return true;
+    }
+    // FUSE path under ~/.gvfs or /run/user/…/gvfs even if scheme probing fails.
+    if let Some(path) = mount.root().path() {
+        let s = path.to_string_lossy();
+        if s.contains("/gvfs/")
+            && DEVICE_SCHEMES
+                .iter()
+                .any(|sch| s.contains(&format!("{sch}:")))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn is_user_mounted_drive(mount: &gio::Mount) -> bool {
+    // Phones / cameras often have no GDrive and live under /run/user/…/gvfs/.
+    if is_phone_or_camera_mount(mount) {
+        return true;
+    }
+
     let root = mount.root();
     let Some(path) = root.path() else {
         return false;
@@ -774,9 +812,14 @@ fn is_user_mounted_drive(mount: &gio::Mount) -> bool {
     if s == "/" || s.starts_with("/boot") || s.starts_with("/snap") || s.starts_with("/var/") {
         return false;
     }
+    // Never treat network GVFS mounts as local drives (those belong under Network).
+    if s.contains("/gvfs/") {
+        return false;
+    }
 
     // Anything under the classic automount roots is a "mounted drive" the
     // user expects to browse / eject — including NVMe partitions at /media.
+    // Avoid Path::is_dir() on slow/remote filesystems; media mounts are local.
     if s.starts_with("/media/") || s.starts_with("/run/media/") {
         return mount.can_eject() || mount.can_unmount() || path.is_dir();
     }
@@ -792,11 +835,73 @@ fn is_user_mounted_drive(mount: &gio::Mount) -> bool {
 
 fn drive_looks_system_root(drive: &gio::Drive) -> bool {
     // Keep the OS root disk out of Mounted Drives when its only mount is `/`.
+    // Removable USB drives without a unix-device id (some phones) are kept.
+    if drive.is_removable() || drive.can_eject() {
+        return false;
+    }
     let id = drive
         .identifier("unix-device")
         .unwrap_or_default()
         .to_ascii_lowercase();
     id.is_empty()
+}
+
+/// Prefer a human label over bare GVFS scheme names like "mtp".
+fn mount_display_name(mount: &gio::Mount) -> String {
+    if let Some(vol) = mount.volume() {
+        let n = vol.name().to_string();
+        if !n.is_empty() {
+            return n;
+        }
+    }
+    if let Some(drive) = mount.drive() {
+        let n = drive.name().to_string();
+        if !n.is_empty() {
+            return n;
+        }
+    }
+    let raw = mount.name().to_string();
+    let lower = raw.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "" | "mtp" | "gphoto" | "gphoto2" | "afc" | "ptp"
+    ) {
+        if let Some(pretty) = pretty_name_from_device_uri(&mount.root().uri()) {
+            return pretty;
+        }
+        if raw.is_empty() {
+            return "Phone".into();
+        }
+    }
+    raw
+}
+
+/// `mtp://nubia_REDMAGIC_10_Pro_SERIAL/` → `nubia REDMAGIC 10 Pro`.
+fn pretty_name_from_device_uri(uri: &str) -> Option<String> {
+    let rest = uri.split("://").nth(1)?;
+    let host = rest.split('/').next()?.trim();
+    if host.is_empty() {
+        return None;
+    }
+    let host = host
+        .strip_prefix("host=")
+        .unwrap_or(host)
+        .trim_matches(|c| c == '[' || c == ']');
+    let mut parts: Vec<&str> = host.split('_').filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() {
+        return None;
+    }
+    // Drop trailing serial-like tokens (long alphanumeric IDs).
+    while parts.len() > 1 {
+        let last = *parts.last().unwrap();
+        let serialish = last.len() >= 8 && last.chars().all(|c| c.is_ascii_alphanumeric());
+        if serialish {
+            parts.pop();
+        } else {
+            break;
+        }
+    }
+    Some(parts.join(" "))
 }
 
 /// Volumes that exist but are not currently mounted (show with a Mount button).
@@ -1072,7 +1177,7 @@ fn make_unmounted_volume_row(volume: &gio::Volume, sidebar: Rc<Sidebar>) -> gtk:
     box_.set_margin_top(2);
     box_.set_margin_bottom(2);
 
-    let image = gtk::Image::from_icon_name("drive-harddisk-symbolic");
+    let image = gtk::Image::from_icon_name(volume_icon_name(volume));
     image.add_css_class("dim-label");
     let lbl = gtk::Label::new(Some(&name));
     lbl.set_xalign(0.0);
@@ -1127,8 +1232,10 @@ fn make_mount_row_with_icon(
     sidebar: Rc<Sidebar>,
     icon_name: &str,
 ) -> gtk::ListBoxRow {
-    let name = mount.name().to_string();
+    let name = mount_display_name(mount);
     let root = mount.root();
+    // Prefer the GVFS FUSE path when present so local Path browsing works;
+    // fall back to the URI (mtp://…, gphoto2://…) when path() is None.
     let place = root
         .path()
         .map(Place::Path)
@@ -1148,6 +1255,8 @@ fn make_mount_row_with_icon(
     lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
     if let Some(path) = root.path() {
         lbl.set_tooltip_text(Some(&path.display().to_string()));
+    } else {
+        lbl.set_tooltip_text(Some(&root.uri()));
     }
     box_.append(&image);
     box_.append(&lbl);
@@ -1186,6 +1295,13 @@ fn make_mount_row_with_icon(
 }
 
 fn mount_icon_name(mount: &gio::Mount) -> String {
+    if is_phone_or_camera_mount(mount) {
+        let scheme = mount_uri_scheme(mount);
+        if scheme.starts_with("gphoto") {
+            return "camera-photo-symbolic".into();
+        }
+        return "phone-symbolic".into();
+    }
     if let Some(drive) = mount.drive() {
         let id = drive
             .identifier("unix-device")
@@ -1196,6 +1312,21 @@ fn mount_icon_name(mount: &gio::Mount) -> String {
         }
     }
     "drive-removable-media-symbolic".into()
+}
+
+fn volume_icon_name(volume: &gio::Volume) -> &'static str {
+    let id = volume
+        .identifier("unix-device")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    // USB bus devices are typically phones / cameras waiting for MTP/PTP mount.
+    if id.starts_with("/dev/bus/usb/") {
+        return "phone-symbolic";
+    }
+    if id.contains("sr") || id.contains("cdrom") {
+        return "media-optical-symbolic";
+    }
+    "drive-harddisk-symbolic"
 }
 
 fn eject_or_unmount(mount: &gio::Mount) {

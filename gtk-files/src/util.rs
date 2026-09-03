@@ -73,8 +73,18 @@ pub fn is_directory(info: &gio::FileInfo) -> bool {
     info.file_type() == gio::FileType::Directory
 }
 
+/// Hidden / backup flag — MTP and some GVFS backends omit these attributes
+/// even when requested; calling `is_hidden()` then emits a GIO critical.
 pub fn is_hidden(info: &gio::FileInfo) -> bool {
-    info.is_hidden() || info.is_backup() || display_name(info).starts_with('.')
+    let flagged = info.has_attribute(gio::FILE_ATTRIBUTE_STANDARD_IS_HIDDEN)
+        && info.is_hidden();
+    let backup = info.has_attribute(gio::FILE_ATTRIBUTE_STANDARD_IS_BACKUP) && info.is_backup();
+    flagged || backup || display_name(info).starts_with('.')
+}
+
+/// Symlink flag — same MTP/GVFS caveat as [`is_hidden`].
+pub fn is_symlink(info: &gio::FileInfo) -> bool {
+    info.has_attribute(gio::FILE_ATTRIBUTE_STANDARD_IS_SYMLINK) && info.is_symlink()
 }
 
 /// Whether the current user can write/modify this item (from `access::can-write`).
@@ -136,7 +146,7 @@ pub fn icon_for_info(info: &gio::FileInfo, symbolic: bool) -> gio::Icon {
     // Prefer overlay badges in the list/grid views; still attach emblems here
     // for any caller that renders GIcons directly (e.g. fallbacks).
     let mut icon = base;
-    if info.is_symlink() {
+    if is_symlink(info) {
         let emblem_icon = gio::ThemedIcon::new("emblem-symbolic-link");
         let emblem = gio::Emblem::new(&emblem_icon);
         icon = gio::EmblemedIcon::new(&icon, Some(&emblem)).upcast();
@@ -238,6 +248,12 @@ pub fn location_from_open_arg(arg: impl AsRef<std::ffi::OsStr>, cwd: Option<&Pat
         return trash_file();
     }
     if let Some(path) = file.path() {
+        let s = path.to_string_lossy();
+        // GVFS FUSE paths (mtp:, sftp:, …) — never call is_dir()/exists(); those
+        // do synchronous remote I/O and can hang the UI on phone mounts.
+        if s.contains("/gvfs/") {
+            return gio::File::for_path(path);
+        }
         if path.is_dir() {
             return gio::File::for_path(path);
         }

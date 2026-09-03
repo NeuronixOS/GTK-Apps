@@ -406,9 +406,9 @@ pub fn paste_into(
 /// Copy or move `paths` into `dest_dir` (used by paste and drag-and-drop).
 ///
 /// - `overwrite == false`: uniquify names (`file (1).ext`) so existing items
-///   are never replaced.
-/// - `overwrite == true` (Shift+drop = move+clobber): keep the same name; if a
-///   destination already exists, ask Replace / Skip / Apply to Rest / Cancel.
+///   are never replaced (paste).
+/// - `overwrite == true` (drag-and-drop): keep the same name; if a destination
+///   already exists, ask Replace / Merge / Skip / Apply to Rest / Cancel.
 ///
 /// Large jobs run off the UI thread with a non-blocking sidebar progress panel.
 pub fn drop_into(
@@ -494,7 +494,7 @@ fn run_jobs(
     run_transfer_with_progress(parent_win.as_ref(), jobs, move_files, total_bytes, on_done);
 }
 
-/// Ask about name conflicts when Shift+dropping (move + clobber), then transfer.
+/// Ask about name conflicts (drag-and-drop), then transfer.
 fn resolve_overwrite_jobs(
     parent_win: Option<gtk::Window>,
     pending: Vec<(PathBuf, PathBuf)>,
@@ -521,6 +521,26 @@ fn resolve_overwrite_jobs(
                 f();
             }
         });
+    }
+
+    fn continue_step(
+        parent_win: Option<gtk::Window>,
+        remaining: Rc<RefCell<VecDeque<(PathBuf, PathBuf)>>>,
+        accepted: Rc<RefCell<Vec<(PathBuf, PathBuf)>>>,
+        replace_all: Rc<Cell<bool>>,
+        skip_all: Rc<Cell<bool>>,
+        move_files: bool,
+        on_done: DoneSlot,
+    ) {
+        step(
+            parent_win,
+            remaining,
+            accepted,
+            replace_all,
+            skip_all,
+            move_files,
+            on_done,
+        );
     }
 
     fn step(
@@ -563,10 +583,24 @@ fn resolve_overwrite_jobs(
                 .unwrap_or_else(|| dest.display().to_string());
             let kind = if dest.is_dir() { "folder" } else { "file" };
             let verb = if move_files { "move" } else { "copy" };
-            let detail = format!(
-                "A {kind} named “{name}” already exists in the destination.\n\n\
-                 Replace it with the one you are {verb}ing?"
-            );
+            let can_merge = src.is_dir() && dest.is_dir();
+            let detail = if can_merge {
+                format!(
+                    "A folder named “{name}” already exists in the destination.\n\n\
+                     Merge — combine the contents of both folders\n\
+                     Replace — replace the existing folder with the one you are {verb}ing"
+                )
+            } else {
+                format!(
+                    "A {kind} named “{name}” already exists in the destination.\n\n\
+                     Replace it with the one you are {verb}ing?"
+                )
+            };
+            let message = if can_merge {
+                format!("“{name}” already exists")
+            } else {
+                format!("Replace “{name}”?")
+            };
 
             let more = !remaining.borrow().is_empty();
             let parent_for_dialog = parent_win.clone();
@@ -578,26 +612,52 @@ fn resolve_overwrite_jobs(
             let src2 = src.clone();
             let dest2 = dest.clone();
 
-            // When more conflicts remain: Cancel | Skip | Skip Rest | Replace | Apply to Rest
             let dialog = if more {
+                if can_merge {
+                    gtk::AlertDialog::builder()
+                        .modal(true)
+                        .message(&message)
+                        .detail(&detail)
+                        .buttons([
+                            "Cancel",
+                            "Skip",
+                            "Skip Rest",
+                            "Merge",
+                            "Replace",
+                            "Apply to Rest",
+                        ])
+                        .default_button(4)
+                        .cancel_button(0)
+                        .build()
+                } else {
+                    gtk::AlertDialog::builder()
+                        .modal(true)
+                        .message(&message)
+                        .detail(&detail)
+                        .buttons([
+                            "Cancel",
+                            "Skip",
+                            "Skip Rest",
+                            "Replace",
+                            "Apply to Rest",
+                        ])
+                        .default_button(3)
+                        .cancel_button(0)
+                        .build()
+                }
+            } else if can_merge {
                 gtk::AlertDialog::builder()
                     .modal(true)
-                    .message("Replace existing item?")
+                    .message(&message)
                     .detail(&detail)
-                    .buttons([
-                        "Cancel",
-                        "Skip",
-                        "Skip Rest",
-                        "Replace",
-                        "Apply to Rest",
-                    ])
+                    .buttons(["Cancel", "Skip", "Merge", "Replace"])
                     .default_button(3)
                     .cancel_button(0)
                     .build()
             } else {
                 gtk::AlertDialog::builder()
                     .modal(true)
-                    .message("Replace existing item?")
+                    .message(&message)
                     .detail(&detail)
                     .buttons(["Cancel", "Skip", "Replace"])
                     .default_button(2)
@@ -610,122 +670,113 @@ fn resolve_overwrite_jobs(
                 None::<&gio::Cancellable>,
                 move |res| {
                     let choice = res.unwrap_or(0);
+                    let cancel = || {
+                        remaining2.borrow_mut().clear();
+                        finish(parent_win.clone(), Rc::clone(&accepted2), move_files, Rc::clone(&on_done2));
+                    };
+                    let next = || {
+                        continue_step(
+                            parent_win.clone(),
+                            Rc::clone(&remaining2),
+                            Rc::clone(&accepted2),
+                            Rc::clone(&replace_all2),
+                            Rc::clone(&skip_all2),
+                            move_files,
+                            Rc::clone(&on_done2),
+                        );
+                    };
+                    let replace_one = || {
+                        if let Err(e) = remove_path(&dest2) {
+                            show_error(
+                                parent_win.as_ref(),
+                                "Replace failed",
+                                &format!("Could not remove {}: {e}", dest2.display()),
+                            );
+                        } else {
+                            accepted2.borrow_mut().push((src2.clone(), dest2.clone()));
+                        }
+                    };
+                    let merge_one = || {
+                        if let Err(e) = merge_directory(&src2, &dest2, move_files) {
+                            show_error(
+                                parent_win.as_ref(),
+                                "Merge failed",
+                                &format!(
+                                    "{} → {}: {e}",
+                                    src2.display(),
+                                    dest2.display()
+                                ),
+                            );
+                        }
+                    };
+
                     if more {
+                        if can_merge {
+                            match choice {
+                                0 => cancel(),
+                                1 => next(),
+                                2 => {
+                                    skip_all2.set(true);
+                                    next();
+                                }
+                                3 => {
+                                    merge_one();
+                                    next();
+                                }
+                                4 => {
+                                    replace_one();
+                                    next();
+                                }
+                                5 => {
+                                    replace_all2.set(true);
+                                    replace_one();
+                                    next();
+                                }
+                                _ => cancel(),
+                            }
+                        } else {
+                            match choice {
+                                0 => cancel(),
+                                1 => next(),
+                                2 => {
+                                    skip_all2.set(true);
+                                    next();
+                                }
+                                3 => {
+                                    replace_one();
+                                    next();
+                                }
+                                4 => {
+                                    replace_all2.set(true);
+                                    replace_one();
+                                    next();
+                                }
+                                _ => cancel(),
+                            }
+                        }
+                    } else if can_merge {
                         match choice {
-                            0 => {
-                                remaining2.borrow_mut().clear();
-                                finish(parent_win, accepted2, move_files, on_done2);
-                            }
-                            1 => {
-                                step(
-                                    parent_win,
-                                    remaining2,
-                                    accepted2,
-                                    replace_all2,
-                                    skip_all2,
-                                    move_files,
-                                    on_done2,
-                                );
-                            }
+                            0 => cancel(),
+                            1 => next(),
                             2 => {
-                                skip_all2.set(true);
-                                step(
-                                    parent_win,
-                                    remaining2,
-                                    accepted2,
-                                    replace_all2,
-                                    skip_all2,
-                                    move_files,
-                                    on_done2,
-                                );
+                                merge_one();
+                                next();
                             }
                             3 => {
-                                if let Err(e) = remove_path(&dest2) {
-                                    show_error(
-                                        parent_win.as_ref(),
-                                        "Replace failed",
-                                        &format!("Could not remove {}: {e}", dest2.display()),
-                                    );
-                                } else {
-                                    accepted2.borrow_mut().push((src2, dest2));
-                                }
-                                step(
-                                    parent_win,
-                                    remaining2,
-                                    accepted2,
-                                    replace_all2,
-                                    skip_all2,
-                                    move_files,
-                                    on_done2,
-                                );
+                                replace_one();
+                                next();
                             }
-                            4 => {
-                                replace_all2.set(true);
-                                if let Err(e) = remove_path(&dest2) {
-                                    show_error(
-                                        parent_win.as_ref(),
-                                        "Replace failed",
-                                        &format!("Could not remove {}: {e}", dest2.display()),
-                                    );
-                                } else {
-                                    accepted2.borrow_mut().push((src2, dest2));
-                                }
-                                step(
-                                    parent_win,
-                                    remaining2,
-                                    accepted2,
-                                    replace_all2,
-                                    skip_all2,
-                                    move_files,
-                                    on_done2,
-                                );
-                            }
-                            _ => {
-                                remaining2.borrow_mut().clear();
-                                finish(parent_win, accepted2, move_files, on_done2);
-                            }
+                            _ => cancel(),
                         }
                     } else {
                         match choice {
-                            0 => {
-                                remaining2.borrow_mut().clear();
-                                finish(parent_win, accepted2, move_files, on_done2);
-                            }
-                            1 => {
-                                step(
-                                    parent_win,
-                                    remaining2,
-                                    accepted2,
-                                    replace_all2,
-                                    skip_all2,
-                                    move_files,
-                                    on_done2,
-                                );
-                            }
+                            0 => cancel(),
+                            1 => next(),
                             2 => {
-                                if let Err(e) = remove_path(&dest2) {
-                                    show_error(
-                                        parent_win.as_ref(),
-                                        "Replace failed",
-                                        &format!("Could not remove {}: {e}", dest2.display()),
-                                    );
-                                } else {
-                                    accepted2.borrow_mut().push((src2, dest2));
-                                }
-                                step(
-                                    parent_win,
-                                    remaining2,
-                                    accepted2,
-                                    replace_all2,
-                                    skip_all2,
-                                    move_files,
-                                    on_done2,
-                                );
+                                replace_one();
+                                next();
                             }
-                            _ => {
-                                remaining2.borrow_mut().clear();
-                                finish(parent_win, accepted2, move_files, on_done2);
-                            }
+                            _ => cancel(),
                         }
                     }
                 },
@@ -743,6 +794,32 @@ fn resolve_overwrite_jobs(
         move_files,
         on_done,
     );
+}
+
+/// Combine `src` folder contents into existing `dest` folder.
+fn merge_directory(src: &Path, dest: &Path, move_files: bool) -> Result<(), String> {
+    if !src.is_dir() || !dest.is_dir() {
+        return Err("Merge requires two folders".into());
+    }
+    for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let child_src = entry.path();
+        let child_dest = dest.join(entry.file_name());
+        if child_dest.exists() {
+            if child_src.is_dir() && child_dest.is_dir() {
+                merge_directory(&child_src, &child_dest, move_files)?;
+            } else {
+                remove_path(&child_dest)?;
+                transfer_one(&child_src, &child_dest, move_files, &mut |_| Ok(()))?;
+            }
+        } else {
+            transfer_one(&child_src, &child_dest, move_files, &mut |_| Ok(()))?;
+        }
+    }
+    if move_files {
+        std::fs::remove_dir_all(src).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn remove_path(path: &Path) -> Result<(), String> {
