@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=YouTube Music
+Comment=Dedicated YouTube Music player
+Exec=gtk-ytmusic
+Icon=multimedia-audio-player
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupNotify=true
+StartupWMClass=org.neuronix.GtkYtMusic

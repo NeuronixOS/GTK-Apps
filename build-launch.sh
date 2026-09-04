@@ -39,6 +39,7 @@ Options:
 
 Apps: gtk-calc gtk-edit gtk-files gtk-image gtk-video gtk-term gtk-theme-editor
       gtk-meetings gtk-workspaces gtk-worktimezone gtk-photos gtk-colors
+      gtk-ytmusic
 EOF
 }
 
@@ -62,6 +63,7 @@ ALL_APPS=(
   gtk-worktimezone
   gtk-photos
   gtk-colors
+  gtk-ytmusic
 )
 
 is_known_app() {
@@ -128,6 +130,10 @@ app_stop_spec() {
       ;;
     gtk-colors)
       echo "pattern:${ROOT}/gtk-colors/colors.py"
+      ;;
+    gtk-ytmusic)
+      # Chromium --app uses our isolated profile; WebKit mode runs app.py.
+      echo "pattern:gtk-ytmusic/chromium-profile|${ROOT}/gtk-ytmusic/app.py"
       ;;
     *)
       echo "pattern:${ROOT}/${app}"
