@@ -37,7 +37,19 @@ use window::{open_files, start_autosave, EditorWindow};
 
 const APP_ID: &str = "org.neuronix.GtkEdit";
 
+fn prefer_color_emoji_renderer() {
+    // Hyprland/Neuronix pins GSK_RENDERER=cairo, which cannot paint COLRv1
+    // Noto Color Emoji (they render as black-and-white outlines).
+    if std::env::var("GSK_RENDERER")
+        .map(|v| v.eq_ignore_ascii_case("cairo"))
+        .unwrap_or(false)
+    {
+        std::env::set_var("GSK_RENDERER", "ngl");
+    }
+}
+
 fn main() -> glib::ExitCode {
+    prefer_color_emoji_renderer();
     let app = gtk::Application::builder()
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_OPEN | gio::ApplicationFlags::HANDLES_COMMAND_LINE)

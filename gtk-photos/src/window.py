@@ -195,6 +195,14 @@ class ImageViewerWindow(Gtk.Window):
     
     def __init__(self, filepath: str, image_list: list = None, current_index: int = 0, parent_window=None):
         super().__init__(title=os.path.basename(filepath))
+        # Attach to the suite app so Hyprland class is org.neuronix.GtkPhotos (grid rules).
+        if parent_window is not None:
+            try:
+                app = parent_window.get_application()
+            except Exception:
+                app = None
+            if app is not None:
+                self.set_application(app)
         # Don't set transient_for - allows images to be behind main window
         self.set_modal(False)
         
@@ -490,13 +498,12 @@ def open_image_with_constraints(filepath: str, parent_window=None, image_list: l
             '--disable-infobars',  # Disable info bars
         ]
         
-        # Add window size and center on the monitor showing the main app window
         if window_width and window_height:
-            pos_x, pos_y = centered_window_position(
-                window_width, window_height, parent_window
+            chromium_cmd.extend(
+                chromium_viewer_window_flags(
+                    window_width, window_height, parent_window
+                )
             )
-            chromium_cmd.append(f'--window-size={window_width},{window_height}')
-            chromium_cmd.append(f'--window-position={pos_x},{pos_y}')
         
         # Launch Chromium - each instance opens in its own window
         # The unique user-data-dir should force a new instance, but Chromium's singleton
@@ -732,6 +739,40 @@ def centered_window_position(
     return fallback
 
 
+def on_hyprland() -> bool:
+    return bool(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"))
+
+
+def chromium_viewer_window_flags(
+    window_width: int,
+    window_height: int,
+    parent_window: Gtk.Window | None = None,
+    click_widget: Gtk.Widget | None = None,
+    click_x: float | None = None,
+    click_y: float | None = None,
+    click_mouse: tuple[int, int] | None = None,
+) -> list[str]:
+    """Size + class for Hyprland grid rules; center on the parent monitor elsewhere."""
+    flags = [
+        "--class=gtk-photos-media",
+        f"--window-size={window_width},{window_height}",
+    ]
+    if on_hyprland():
+        # hdmi-window-half.py watch places these row-major on HDMI.
+        return flags
+    pos_x, pos_y = centered_window_position(
+        window_width,
+        window_height,
+        parent_window,
+        click_widget,
+        click_x,
+        click_y,
+        click_mouse,
+    )
+    flags.append(f"--window-position={pos_x},{pos_y}")
+    return flags
+
+
 def open_file_with_chromium(
     filepath: str,
     parent_window: Gtk.Window | None = None,
@@ -842,17 +883,17 @@ def open_file_with_chromium(
         ]
 
         _log_opening('Chromium')
-        chromium_cmd.append(f'--window-size={window_width},{window_height}')
-        pos_x, pos_y = centered_window_position(
-            window_width,
-            window_height,
-            parent_window,
-            click_widget,
-            click_x,
-            click_y,
-            click_mouse,
+        chromium_cmd.extend(
+            chromium_viewer_window_flags(
+                window_width,
+                window_height,
+                parent_window,
+                click_widget,
+                click_x,
+                click_y,
+                click_mouse,
+            )
         )
-        chromium_cmd.append(f'--window-position={pos_x},{pos_y}')
 
         print(f"Chromium command: {' '.join(chromium_cmd)}")
 
@@ -891,7 +932,10 @@ def open_file_with_chromium(
             _remove_path_quiet(html_file)
             return
 
-        print(f"Chromium started ({len(chromium_procs)} process(es)) at {pos_x},{pos_y}")
+        print(
+            f"Chromium started ({len(chromium_procs)} process(es)) "
+            f"window {window_width}x{window_height}"
+        )
         # Remove Chromium profile + player HTML after the viewer closes
         _watch_and_cleanup_chromium(unique_user_data, html_file)
 

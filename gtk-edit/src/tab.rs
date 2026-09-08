@@ -242,7 +242,7 @@ pub fn apply_view_config(view: &sourceview5::View, cfg: &EditorConfig) {
         }
     };
     let css = format!(
-        "textview.gtk-edit-view {{ font-family: \"{family}\"; font-size: {size_pt}pt; }}"
+        "textview.gtk-edit-view {{ font-family: \"{family}\", \"Noto Color Emoji\", emoji, monospace; font-size: {size_pt}pt; }}"
     );
     let provider = gtk::CssProvider::new();
     provider.load_from_data(&css);
