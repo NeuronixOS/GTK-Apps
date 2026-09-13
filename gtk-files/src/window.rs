@@ -1656,17 +1656,17 @@ impl FilesWindow {
                 let new_name = entry.text().to_string();
                 entry.remove_css_class("error");
                 error.set_visible(false);
+                // Pause before rename so CREATED cannot add a duplicate while
+                // the old name is still listed.
+                tab.pause_directory_monitor();
                 match file_ops::rename(&path, &new_name) {
                     Ok(_) => {
                         error.set_visible(false);
                         dialog.close();
-                        // Defer refresh so the modal tear-down finishes first —
-                        // refreshing mid-dialog has crashed the directory model.
-                        glib::idle_add_local_once(move || {
-                            tab.refresh();
-                        });
+                        tab.schedule_reload();
                     }
                     Err(e) => {
+                        tab.resume_directory_monitor();
                         // Never refresh on failure — DirectoryList can crash if a
                         // colliding name was applied to the model.
                         error.set_text(&e);

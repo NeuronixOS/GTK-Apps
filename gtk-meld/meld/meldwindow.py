@@ -345,6 +345,21 @@ class MeldWindow(Adw.ApplicationWindow):
         if hasattr(newdoc, "toolbar_actions"):
             self.view_toolbar.append(newdoc.toolbar_actions)
 
+        self._sync_window_title()
+
+    def _sync_window_title(self) -> None:
+        """Window title drives Hyprland: diffs fill HDMI; the launcher stays compact."""
+        page = self.tabview.get_selected_page()
+        if not page:
+            self.set_title("GTK Meld")
+            return
+        child = page.get_child()
+        if isinstance(child, (FileDiff, DirDiff, ImageDiff, VcView)):
+            label = (getattr(child, "tab_title", None) or "").strip()
+            self.set_title(label or "Diff — GTK Meld")
+        else:
+            self.set_title("GTK Meld")
+
     def action_new_tab(self, action, parameter):
         self.append_new_comparison()
 
@@ -412,6 +427,7 @@ class MeldWindow(Adw.ApplicationWindow):
         page = self.tabview.append(doc)
         doc.bind_property("tab-title", page, "title", BIND_DEFAULT_CREATE)
         doc.bind_property("tab-tooltip", page, "tooltip", BIND_DEFAULT_CREATE)
+        doc.connect("notify::tab-title", lambda *_: self._sync_window_title())
 
         # Change focus to the newly created page only if the user is on a
         # DirDiff or VcView page, or if it's a new tab page. This prevents

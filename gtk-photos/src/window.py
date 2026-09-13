@@ -758,7 +758,7 @@ def chromium_viewer_window_flags(
         f"--window-size={window_width},{window_height}",
     ]
     if on_hyprland():
-        # hdmi-window-half.py watch places these row-major on HDMI.
+        # window-manager.py watch places these row-major on HDMI.
         return flags
     pos_x, pos_y = centered_window_position(
         window_width,

@@ -417,8 +417,11 @@ impl FolderTab {
         // Clear then set: TreeListModel can keep showing the previous folder when
         // DirectoryList.set_file is called with only the new location (sidebar
         // Recent / Home clicks updated the terminal via on_location but not the list).
+        // Pause the GFileMonitor while swapping — same race as refresh().
+        self.directory.set_monitored(false);
         self.directory.set_file(None::<&gio::File>);
         self.directory.set_file(Some(&file));
+        self.directory.set_monitored(true);
         self.tree_selection.unselect_all();
         self.grid_selection.unselect_all();
         *self.tree_anchor.borrow_mut() = None;
@@ -835,10 +838,33 @@ impl FolderTab {
     pub fn refresh(&self) {
         thumbnails::bump_generation();
         let file = self.location();
+        // Pause the GFileMonitor while swapping the model. Otherwise a rename's
+        // CREATED event races the new enumerator and the same file shows twice
+        // until the next refresh. set_file(None) is still required — setting
+        // the same location is a no-op on DirectoryList.
+        self.directory.set_monitored(false);
         self.directory.set_file(None::<&gio::File>);
         self.directory.set_file(Some(&file));
+        self.directory.set_monitored(true);
         self.refresh_sync_ui();
         self.update_status();
+    }
+
+    pub fn pause_directory_monitor(&self) {
+        self.directory.set_monitored(false);
+    }
+
+    pub fn resume_directory_monitor(&self) {
+        self.directory.set_monitored(true);
+    }
+
+    /// Reload after a modal / file-op finishes. Idle is too soon — ColumnView
+    /// and TreeExpander are still tearing down and that crashes GTK.
+    pub fn schedule_reload(self: &Rc<Self>) {
+        let tab = Rc::clone(self);
+        glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
+            tab.refresh();
+        });
     }
 
     /// Focus the visible file view (list or grid). Used after tab switches so
@@ -1283,6 +1309,26 @@ fn resolve_file(info: &gio::FileInfo, fallback_dir: Option<&gio::File>) -> Optio
         return Some(f);
     }
     fallback_dir.map(|d| util::file_from_dir_and_info(d, info))
+}
+
+fn clear_file_target(widget: &impl IsA<gtk::Widget>) {
+    unsafe {
+        if let Some(ptr) =
+            widget.data::<Rc<RefCell<Option<(gio::File, bool, PathBuf)>>>>("file-target")
+        {
+            *ptr.as_ref().borrow_mut() = None;
+        }
+    }
+}
+
+fn unbind_tree_name_row(item: &gtk::ListItem) {
+    let Some(expander) = item.child().and_downcast::<gtk::TreeExpander>() else {
+        return;
+    };
+    expander.set_list_row(None::<&gtk::TreeListRow>);
+    if let Some(row) = expander.child().and_downcast::<gtk::Box>() {
+        clear_file_target(&row);
+    }
 }
 
 fn info_from_selection_item(item: &glib::Object) -> Option<gio::FileInfo> {
@@ -1788,6 +1834,10 @@ fn build_tree_column_view(
                 icon.set_pixel_size(32);
             }
         });
+        factory.connect_unbind(|_, item| {
+            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+            unbind_tree_name_row(item);
+        });
         let col = gtk::ColumnViewColumn::new(Some("Name"), Some(factory));
         col.set_expand(true);
         view.append_column(&col);
@@ -2163,6 +2213,12 @@ fn build_grid_view(
         } else {
             icon.set_from_gicon(&icon_for_info(&info, false));
             icon.set_pixel_size(size);
+        }
+    });
+    factory.connect_unbind(|_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+        if let Some(box_) = item.child().and_downcast::<gtk::Box>() {
+            clear_file_target(&box_);
         }
     });
 
