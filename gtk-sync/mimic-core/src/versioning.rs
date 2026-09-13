@@ -53,6 +53,22 @@ pub fn content_hash(data: &[u8]) -> String {
     hex::encode(h.finalize())
 }
 
+/// Stream a file through SHA-256 so large trees do not get read into RAM.
+pub fn content_hash_path(path: &Path) -> anyhow::Result<String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut h = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(hex::encode(h.finalize()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,6 +6,7 @@ use base64::Engine;
 use mimic_core::index::{FileEntry, Tombstone, TombstoneKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::path::Path;
 
 #[derive(Clone)]
 pub struct CouchStore {
@@ -535,6 +536,62 @@ impl CouchStore {
             }
         }
         Ok(unlink)
+    }
+
+    async fn bulk_delete_docs(&self, docs: &[Value]) -> anyhow::Result<usize> {
+        if docs.is_empty() {
+            return Ok(0);
+        }
+        let payload: Vec<Value> = docs
+            .iter()
+            .filter_map(|d| {
+                let id = d["_id"].as_str()?;
+                let rev = d["_rev"].as_str()?;
+                Some(json!({
+                    "_id": id,
+                    "_rev": rev,
+                    "_deleted": true,
+                }))
+            })
+            .collect();
+        let mut n = 0usize;
+        for chunk in payload.chunks(500) {
+            let url = format!("{}/_bulk_docs", self.db_url());
+            let resp = self
+                .apply_auth(self.client.post(&url))
+                .json(&json!({ "docs": chunk }))
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                let t = resp.text().await.unwrap_or_default();
+                anyhow::bail!("_bulk_docs: {t}");
+            }
+            n += chunk.len();
+        }
+        Ok(n)
+    }
+
+    /// Drop current-file and version docs whose on-disk blob is gone.
+    ///
+    /// Without this, a wiped `versions/` dir plus a surviving CouchDB index makes
+    /// clients treat matching hashes as up-to-date and never re-upload.
+    pub async fn drop_missing_blobs(&self, versions_dir: &Path) -> anyhow::Result<usize> {
+        let mut doomed = Vec::new();
+        for d in self.find(json!({ "type": "file" }), 100_000).await? {
+            let name = d["stored_name"].as_str().unwrap_or("");
+            if name.is_empty() || !versions_dir.join(name).is_file() {
+                doomed.push(d);
+            }
+        }
+        for d in self.find(json!({ "type": "version" }), 100_000).await? {
+            let name = d["stored_name"].as_str().unwrap_or("");
+            if name.is_empty() || !versions_dir.join(name).is_file() {
+                doomed.push(d);
+            }
+        }
+        let n = doomed.len();
+        self.bulk_delete_docs(&doomed).await?;
+        Ok(n)
     }
 
     /// Import from legacy FileIndex JSON (one-shot migration).

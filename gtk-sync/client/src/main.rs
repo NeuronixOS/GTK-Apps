@@ -1,6 +1,7 @@
 mod dialog;
 mod discover;
 mod restore;
+mod scan;
 mod status;
 mod sync;
 

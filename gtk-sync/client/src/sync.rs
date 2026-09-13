@@ -1,17 +1,17 @@
 use crate::discover;
+use crate::scan;
 use crate::status;
 use base64::Engine;
 use mimic_core::config::{ClientConfig, DiscoveredPeer};
 use mimic_core::index::{FileIndex, Tombstone, TombstoneKind};
+use mimic_core::is_ignored;
 use mimic_core::protocol::{IndexResponse, PutBlobResponse, VersionsResponse};
-use mimic_core::versioning::content_hash;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
-use walkdir::WalkDir;
 
 /// While applying remote tombstones locally, ignore Remove events so we don't
 /// re-POST thousands of tombstones and starve the reconcile loop.
@@ -117,12 +117,15 @@ pub async fn run(config_path: PathBuf) -> anyhow::Result<()> {
     )?;
     watcher.watch(&cfg.root, RecursiveMode::Recursive)?;
 
+    let mut hash_cache = scan::HashCache::load();
+
     // Initial full sync — scanning is not "busy" for the sidebar (large trees
     // can take minutes); only pull/push transfers flip the syncing icon.
     status::set_phase("scanning", false);
-    if let Err(e) = full_sync(&cfg, &rx).await {
+    if let Err(e) = full_sync(&cfg, &rx, &mut hash_cache).await {
         tracing::warn!("initial sync: {e}");
     }
+    hash_cache.save();
     status::set_phase("idle", false);
 
     let mut last_scan = std::time::Instant::now();
@@ -145,9 +148,10 @@ pub async fn run(config_path: PathBuf) -> anyhow::Result<()> {
         // Periodic reconcile
         if last_scan.elapsed() > Duration::from_secs(10) {
             status::set_phase("scanning", false);
-            if let Err(e) = full_sync(&cfg, &rx).await {
+            if let Err(e) = full_sync(&cfg, &rx, &mut hash_cache).await {
                 tracing::debug!("periodic sync: {e}");
             }
+            hash_cache.save();
             status::set_phase("idle", false);
             last_scan = std::time::Instant::now();
         }
@@ -161,41 +165,16 @@ fn ensure_client_root(root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn is_ignored(rel: &str) -> bool {
-    // Skip common VCS / editor noise; no GTK-Sync marker dirs anymore
-    rel.starts_with(".git/")
-        || rel == ".git"
-        || rel.ends_with('~')
-        || rel.is_empty()
+enum PullResult {
+    Written,
+    MissingBlob,
 }
 
-fn local_file_map(root: &Path) -> anyhow::Result<HashMap<String, (u64, String)>> {
-    let mut map = HashMap::new();
-    for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let Some(rel) = mimic_core::index::relative_path(root, entry.path()) else {
-            continue;
-        };
-        if is_ignored(&rel) {
-            continue;
-        }
-        let data = std::fs::read(entry.path())?;
-        let hash = content_hash(&data);
-        let meta = entry.metadata()?;
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        map.insert(rel, (mtime, hash));
-    }
-    Ok(map)
-}
-
-async fn full_sync(cfg: &ClientConfig, rx: &mpsc::Receiver<notify::Event>) -> anyhow::Result<()> {
+async fn full_sync(
+    cfg: &ClientConfig,
+    rx: &mpsc::Receiver<notify::Event>,
+    cache: &mut scan::HashCache,
+) -> anyhow::Result<()> {
     let client = http_client()?;
     let peers = resolve_peers(cfg).await;
     if peers.is_empty() {
@@ -219,6 +198,9 @@ async fn full_sync(cfg: &ClientConfig, rx: &mpsc::Receiver<notify::Event>) -> an
             Ok(r) if r.status().is_success() => {
                 let idx: IndexResponse = r.json().await?;
                 for f in &idx.files {
+                    if is_ignored(&f.path) {
+                        continue;
+                    }
                     let take = match merged.files.get(&f.path) {
                         Some(cur) => f.ts > cur.ts,
                         None => true,
@@ -233,6 +215,9 @@ async fn full_sync(cfg: &ClientConfig, rx: &mpsc::Receiver<notify::Event>) -> an
                         .push(f.clone());
                 }
                 for t in &idx.tombstones {
+                    if is_ignored(&t.path) {
+                        continue;
+                    }
                     if !merged
                         .tombstones
                         .iter()
@@ -258,7 +243,7 @@ async fn full_sync(cfg: &ClientConfig, rx: &mpsc::Receiver<notify::Event>) -> an
     // Publish tombstones immediately — do not wait for pull/push/hashing.
     status::publish_tombstones(&merged.tombstones);
 
-    let local = local_file_map(&cfg.root)?;
+    let local = scan::local_file_map(&cfg.root, cache)?;
 
     // Apply remote deletes (tombstones) locally if local file older/missing awareness
     APPLYING_REMOTE_DELETES.store(true, Ordering::SeqCst);
@@ -299,9 +284,11 @@ async fn full_sync(cfg: &ClientConfig, rx: &mpsc::Receiver<notify::Event>) -> an
     // Drop notify backlog from remove_dir_all so we don't re-tombstone it.
     while rx.try_recv().is_ok() {}
 
+    let mut missing_blobs: HashSet<String> = HashSet::new();
+
     // Pull newer remote files
     for (path, entry) in &merged.files {
-        if status::is_unavailable(path, entry.ts) {
+        if is_ignored(path) {
             continue;
         }
         let need_pull = match local.get(path) {
@@ -317,28 +304,42 @@ async fn full_sync(cfg: &ClientConfig, rx: &mpsc::Receiver<notify::Event>) -> an
             } else if let Some((peer, _)) = peer_indexes.first() {
                 pull_file(cfg, &client, peer, path, entry.ts).await
             } else {
-                Ok(())
+                Ok(PullResult::Written)
             };
-            if let Err(e) = result {
-                tracing::warn!("pull {path}: {e}");
+            match result {
+                Ok(PullResult::MissingBlob) => {
+                    missing_blobs.insert(path.clone());
+                }
+                Err(e) => tracing::warn!("pull {path}: {e}"),
+                Ok(_) => {}
             }
         }
     }
 
-    // Push local files that are newer or missing remotely
-    let local = local_file_map(&cfg.root)?;
+    // Push local files that are newer, missing remotely, or whose server blob 404'd.
+    let local = scan::local_file_map(&cfg.root, cache)?;
+    let mut to_push: Vec<String> = Vec::new();
     for (path, (mtime, hash)) in &local {
         let remote = merged.files.get(path);
         let need_push = match remote {
-            Some(e) if &e.hash == hash => false,
-            Some(_) => true, // content changed locally — push new version
+            Some(e) if &e.hash == hash && !missing_blobs.contains(path) => false,
+            Some(_) => true,
             None => true,
         };
-        let _ = mtime; // reserved for future conflict heuristics
+        let _ = mtime;
         if need_push {
-            if let Err(e) = push_file_to_all(cfg, &client, &peers, path).await {
-                tracing::warn!("push {path}: {e}");
+            to_push.push(path.clone());
+        }
+    }
+    status::mark_pending(&to_push);
+    let mut pushed: HashSet<String> = HashSet::new();
+    for path in &to_push {
+        match push_file_to_all(cfg, &client, &peers, path).await {
+            Ok(()) => {
+                pushed.insert(path.clone());
+                status::clear_unavailable(path);
             }
+            Err(e) => tracing::warn!("push {path}: {e}"),
         }
     }
 
@@ -347,36 +348,40 @@ async fn full_sync(cfg: &ClientConfig, rx: &mpsc::Receiver<notify::Event>) -> an
     let local_paths: HashSet<_> = local.keys().cloned().collect();
     for (path, entry) in &merged.files {
         if !local_paths.contains(path) {
-            // Check if a tombstone already exists newer than entry
             let tombstoned = merged.tombstones.iter().any(|t| {
                 (t.path == *path || t.children.iter().any(|c| c == path)) && t.ts >= entry.ts
             });
             if !tombstoned {
-                // Could be not yet pulled — if we intentionally deleted, watcher sent tombstone.
                 // Skip aggressive delete propagation on scan to avoid wiping on first join.
             }
         }
     }
 
     // Publish reconciled per-file states for gtk-files.
-    let local = local_file_map(&cfg.root)?;
+    let local = scan::local_file_map(&cfg.root, cache)?;
     let mut file_states = std::collections::BTreeMap::new();
     for (path, entry) in &merged.files {
-        if status::is_unavailable(path, entry.ts) {
-            // Missing blob on server — don't leave the UI stuck on "1 pending".
+        if is_ignored(path) {
+            continue;
+        }
+        if missing_blobs.contains(path) && !pushed.contains(path) {
+            file_states.insert(path.clone(), "pending".into());
             continue;
         }
         let state = match local.get(path) {
             Some((_, hash)) if hash == &entry.hash => "up_to_date",
-            Some(_) => "pending",
-            None => "pending",
+            _ => "pending",
         };
         file_states.insert(path.clone(), state.to_string());
     }
     for path in local.keys() {
-        file_states
-            .entry(path.clone())
-            .or_insert_with(|| "up_to_date".into());
+        if pushed.contains(path) {
+            file_states.insert(path.clone(), "up_to_date".into());
+        } else {
+            file_states
+                .entry(path.clone())
+                .or_insert_with(|| "pending".into());
+        }
     }
     status::publish_reconcile(file_states, &merged.tombstones);
 
@@ -389,7 +394,7 @@ async fn pull_file(
     peer: &HttpPeer,
     path: &str,
     ts: u64,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<PullResult> {
     status::begin_transfer(path, "down");
     let url = format!(
         "{}/v1/blob?path={}&ts={ts}",
@@ -404,7 +409,11 @@ async fn pull_file(
             .await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             status::mark_unavailable(path, ts);
-            anyhow::bail!("pull {path} from {}: 404 Not Found (blob missing)", peer.name);
+            tracing::warn!(
+                "pull {path} from {}: 404 Not Found (blob missing) — will re-upload if present locally",
+                peer.name
+            );
+            return Ok(PullResult::MissingBlob);
         }
         if !resp.status().is_success() {
             anyhow::bail!("pull {path} from {}: {}", peer.name, resp.status());
@@ -417,21 +426,18 @@ async fn pull_file(
         std::fs::write(&dest, &data)?;
         status::clear_unavailable(path);
         tracing::info!("pulled {path}@{ts} from {}", peer.name);
-        Ok(())
+        Ok(PullResult::Written)
     }
     .await;
-    if status::is_unavailable(path, ts) {
-        // Already cleared pending via mark_unavailable.
-        return result;
+    match &result {
+        Ok(PullResult::MissingBlob) => return result,
+        Ok(PullResult::Written) => {
+            status::end_transfer(path, "up_to_date");
+        }
+        Err(_) => {
+            status::end_transfer(path, "pending");
+        }
     }
-    status::end_transfer(
-        path,
-        if result.is_ok() {
-            "up_to_date"
-        } else {
-            "pending"
-        },
-    );
     result
 }
 
@@ -513,7 +519,7 @@ async fn handle_fs_event(cfg: &ClientConfig, event: &notify::Event) -> anyhow::R
             let mut to_push = Vec::new();
             for path in &event.paths {
                 if let Some(rel) = mimic_core::index::relative_path(&cfg.root, path) {
-                    if is_ignored(&rel) || !path.is_file() {
+                    if is_ignored(&rel) || !path.is_file() || path.is_symlink() {
                         continue;
                     }
                     to_push.push(rel);
@@ -523,7 +529,9 @@ async fn handle_fs_event(cfg: &ClientConfig, event: &notify::Event) -> anyhow::R
             // on files that have not been uploaded yet.
             status::mark_pending(&to_push);
             for rel in &to_push {
-                push_file_to_all(cfg, &client, &peers, rel).await?;
+                if let Err(e) = push_file_to_all(cfg, &client, &peers, rel).await {
+                    tracing::warn!("push {rel}: {e}");
+                }
             }
         }
         EventKind::Remove(_) => {

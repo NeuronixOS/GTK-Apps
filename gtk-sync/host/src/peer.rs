@@ -60,18 +60,21 @@ async fn sync_once(state: &AppState) -> anyhow::Result<()> {
         for f in &remote.files {
             let local = local_files.iter().find(|e| e.path == f.path);
             let need = match local {
-                Some(e) if e.hash == f.hash => false,
+                Some(e) if e.hash == f.hash => {
+                    !state.versions.join(&e.stored_name).is_file()
+                }
                 Some(e) if e.ts >= f.ts => false,
                 _ => true,
             };
             if !need {
                 continue;
             }
-            // Also check we don't already have this exact version doc
-            if state.couch.get_version(&f.path, f.ts).await?.is_some() {
-                // Have metadata; ensure current pointer
-                state.couch.put_version(f).await?;
-                continue;
+            // Have metadata *and* the blob — just refresh the current pointer.
+            if let Some(local_ver) = state.couch.get_version(&f.path, f.ts).await? {
+                if state.versions.join(&local_ver.stored_name).is_file() {
+                    state.couch.put_version(f).await?;
+                    continue;
+                }
             }
 
             let url = format!("{base}/v1/blob?path={}&ts={}", urlencoding_encode(&f.path), f.ts);

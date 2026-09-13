@@ -45,6 +45,13 @@ pub async fn serve(config_path: PathBuf) -> anyhow::Result<()> {
                     Err(e) => tracing::warn!("purge error: {e}"),
                     _ => {}
                 }
+                match st.couch.drop_missing_blobs(&st.versions).await {
+                    Ok(n) if n > 0 => tracing::warn!(
+                        "dropped {n} index entries whose blobs are missing on disk"
+                    ),
+                    Err(e) => tracing::warn!("blob reconcile: {e}"),
+                    _ => {}
+                }
             }
         });
     }
@@ -131,7 +138,7 @@ async fn get_index(
     headers: HeaderMap,
 ) -> Result<Json<IndexResponse>, StatusCode> {
     check_auth(&headers, &state)?;
-    let files = state
+    let mut files = state
         .couch
         .list_current_files()
         .await
@@ -139,6 +146,12 @@ async fn get_index(
             tracing::error!("index files: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+    // Never advertise a current file whose blob is gone or that we refuse to sync.
+    files.retain(|f| {
+        !mimic_core::is_ignored(&f.path)
+            && !f.stored_name.is_empty()
+            && state.versions.join(&f.stored_name).is_file()
+    });
     let tombstones = state.couch.list_tombstones().await.map_err(|e| {
         tracing::error!("index tombs: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
@@ -193,6 +206,9 @@ async fn put_blob(
     body: Bytes,
 ) -> Result<Json<PutBlobResponse>, StatusCode> {
     check_auth(&headers, &state)?;
+    if mimic_core::is_ignored(&meta.path) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let entry = state
         .put_blob(&meta.path, &body, meta.ts)
         .await

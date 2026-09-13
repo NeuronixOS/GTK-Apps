@@ -49,9 +49,19 @@ impl AppState {
             }
         }
 
+        let versions = versions_dir(&data);
+        match couch.drop_missing_blobs(&versions).await {
+            Ok(n) if n > 0 => tracing::warn!(
+                "dropped {n} CouchDB entries whose blobs are missing under {}",
+                versions.display()
+            ),
+            Err(e) => tracing::warn!("blob reconcile: {e}"),
+            _ => {}
+        }
+
         let cert_fingerprint = mimic_core::tls::cert_fingerprint_file(&config.cert_path)?;
         Ok(Arc::new(Self {
-            versions: versions_dir(&data),
+            versions,
             config,
             couch,
             cert_fingerprint,

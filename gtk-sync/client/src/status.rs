@@ -125,7 +125,7 @@ pub fn mark_pending(paths: &[String]) {
     if let Ok(mut g) = global().lock() {
         for path in paths {
             let cur = g.status.files.get(path).map(|s| s.as_str());
-            if matches!(cur, Some("syncing") | Some("up_to_date")) {
+            if matches!(cur, Some("syncing")) {
                 continue;
             }
             g.status.files.insert(path.clone(), "pending".into());
@@ -201,6 +201,8 @@ pub fn clear_unavailable(path: &str) {
     }
 }
 
+/// Blob missing on the server for this version — do not keep the UI on "pending".
+#[allow(dead_code)]
 pub fn is_unavailable(path: &str, ts: u64) -> bool {
     global()
         .lock()
