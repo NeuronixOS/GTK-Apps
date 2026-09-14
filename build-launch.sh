@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Stop, rebuild (compiled apps only), install/sync, and relaunch GTK-Apps.
 #
-# Works from any checkout of this directory (home, Dropbox, …). Paths are
-# resolved from this script's location, not a hardcoded Dropbox prefix.
+# Works from any checkout of this directory. Paths are resolved from this
+# script's location (expected: LinuxOS/GTK-Apps next to Neuronix/ and KvNix/).
 #
 # Usage:
 #   ./build-launch.sh                         # all apps
@@ -14,8 +14,8 @@
 # Rust apps (Cargo.toml): cargo build --release, then run the binary.
 # Python / script apps: skip build; run via launch/start/run.sh or python entrypoint.
 # After each rebuild, runs ./syn-to-devices.sh:
-#   - LinuxOS tree when found or given via --linuxos / LINUXOS_ROOT
-#   - local Neuronix prefix when /usr/local/lib/neuronix/gtk-apps exists (or --local)
+#   - LinuxOS/Neuronix/default/gtk-apps + KvNix/personalize/gtk-apps (next ISO)
+#   - this computer: /usr/local/lib/neuronix/gtk-apps when that prefix exists (or --local)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,13 +29,16 @@ suite apps are rebuilt. This script may live anywhere — it uses its own
 directory as the source tree.
 
 Options:
-  --linuxos DIR, -L DIR   LinuxOS repo root for syn-to-devices.sh
+  --linuxos DIR, -L DIR   LinuxOS repo root (parent of Neuronix/ and KvNix/)
   --save-linuxos          remember DIR in ~/.config/gtk-apps/linuxos-root
   --no-sync               do not copy into a LinuxOS tree
   --local                 install into /usr/local/lib/neuronix/gtk-apps
   --no-local              skip local install even if the prefix exists
   --no-launch             rebuild/sync only; do not relaunch apps
   -h, --help              show this help
+
+With no extra flags this script syncs into the sibling LinuxOS tree (next ISO)
+and, on a Neuronix/KvNix machine, into /usr/local (this computer).
 
 Apps: gtk-calc gtk-edit gtk-files gtk-image gtk-video gtk-term gtk-theme-editor
       gtk-meetings gtk-workspaces gtk-worktimezone gtk-photos gtk-colors

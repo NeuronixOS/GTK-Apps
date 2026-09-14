@@ -5,6 +5,7 @@ mod config;
 mod dnd;
 mod file_ops;
 mod find_in_files;
+mod git_status;
 mod network;
 mod neuron;
 mod open_with;
@@ -426,6 +427,36 @@ fn load_css() {
             &display,
             &provider,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+
+    // Git name colors must sit at USER priority so they beat gtk-theme chrome
+    // (`label { color: fg }` loads at USER-10).
+    let git_provider = gtk::CssProvider::new();
+    git_provider.load_from_data(
+        "
+        label.git-untracked,
+        .file-row-content.git-untracked label.git-name,
+        .file-row-content.git-untracked label {
+            color: #3b82f6;
+        }
+        label.git-modified,
+        .file-row-content.git-modified label.git-name,
+        .file-row-content.git-modified label {
+            color: #ea580c;
+        }
+        label.git-conflict,
+        .file-row-content.git-conflict label.git-name,
+        .file-row-content.git-conflict label {
+            color: #dc2626;
+        }
+        ",
+    );
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &git_provider,
+            gtk::STYLE_PROVIDER_PRIORITY_USER,
         );
     }
 

@@ -54,6 +54,17 @@ Shared helpers live in `gtk-theme` (`IconMenu`, `labeled_button`, `icon_for_acti
 ./build-launch.sh gtk-files       # one app
 ```
 
+After a successful rebuild, `syn-to-devices.sh` copies binaries into:
+
+- **This computer:** `/usr/local/lib/neuronix/gtk-apps` (when that prefix exists)
+- **Next ISO:** `../Neuronix/default/gtk-apps` and `../Neuronix/personalize/gtk-apps`
+
+```bash
+./syn-to-devices.sh               # ISO tree + live prefix
+./syn-to-devices.sh --no-linuxos --local   # this computer only
+./syn-to-devices.sh --no-local             # ISO recipe only
+```
+
 Rust apps build with `cargo`; Python apps skip compile and launch via `launch.sh` / `start.sh` / `run.sh` or their entrypoint. `gtk-meld` builds separately with `./gtk-meld/build.sh` (meson).
 
 See each app’s `README.md` for build dependencies.

@@ -15,6 +15,7 @@ use gtk::prelude::*;
 
 use crate::config::Config;
 use crate::dnd;
+use crate::git_status::{self, GitDecor};
 use crate::search;
 use crate::sync_status::{self, SyncFileState};
 use crate::thumbnails;
@@ -79,6 +80,8 @@ pub struct FolderTab {
     /// Non-zero query → browsing list is hidden; only search_store shows.
     searching: Cell<bool>,
     search_gen: Arc<AtomicU64>,
+    git_gen: Arc<AtomicU64>,
+    git_debounce: Rc<Cell<u64>>,
     show_deleted: RefCell<bool>,
     /// Keeps FlattenListModel's parent list alive.
     _model_list: gio::ListStore,
@@ -271,6 +274,8 @@ impl FolderTab {
             search_store,
             searching: Cell::new(false),
             search_gen: Arc::new(AtomicU64::new(0)),
+            git_gen: Arc::new(AtomicU64::new(0)),
+            git_debounce: Rc::new(Cell::new(0)),
             show_deleted: RefCell::new(false),
             _model_list: model_list,
         });
@@ -355,6 +360,25 @@ impl FolderTab {
                 });
         }
 
+        {
+            let tab2 = Rc::clone(&tab);
+            tab.directory.connect_items_changed(move |_, _, _, _| {
+                let n = tab2.git_debounce.get() + 1;
+                tab2.git_debounce.set(n);
+                let tab3 = Rc::clone(&tab2);
+                glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
+                    if tab3.git_debounce.get() != n {
+                        return;
+                    }
+                    if let Some(path) = tab3.location_path() {
+                        git_status::invalidate_under(&path);
+                    }
+                    tab3.refresh_git_status();
+                });
+            });
+        }
+
+        tab.start_git_scan(true, false);
         tab
     }
 
@@ -431,6 +455,7 @@ impl FolderTab {
         }
         self.refresh_sync_ui();
         self.update_status();
+        self.start_git_scan(true, false);
     }
 
     pub fn show_deleted(&self) -> bool {
@@ -458,6 +483,44 @@ impl FolderTab {
         restyle_cut_rows(self.grid_view.upcast_ref());
         self.list_view.queue_draw();
         self.grid_view.queue_draw();
+    }
+
+    fn restyle_git_ui(&self) {
+        restyle_git_rows(self.list_view.upcast_ref());
+        restyle_git_rows(self.grid_view.upcast_ref());
+        self.list_view.queue_draw();
+        self.grid_view.queue_draw();
+    }
+
+    fn spawn_git_scan(&self, gen: u64, discover: bool, force: bool) {
+        let latest = Arc::clone(&self.git_gen);
+        let list = self.list_view.clone();
+        let grid = self.grid_view.clone();
+        let Some(cwd) = self.location_path() else {
+            self.restyle_git_ui();
+            return;
+        };
+        if util::is_trash_location(&self.location.borrow()) {
+            self.restyle_git_ui();
+            return;
+        }
+        git_status::request_scan(cwd, gen, latest, discover, force, move || {
+            restyle_git_rows(list.upcast_ref());
+            restyle_git_rows(grid.upcast_ref());
+            list.queue_draw();
+            grid.queue_draw();
+        });
+    }
+
+    fn start_git_scan(&self, discover: bool, force: bool) {
+        let gen = self.git_gen.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+        self.spawn_git_scan(gen, discover, force);
+    }
+
+    /// Re-run porcelain for known repos without cancelling an in-flight discover.
+    fn refresh_git_status(&self) {
+        let gen = self.git_gen.load(AtomicOrdering::Relaxed);
+        self.spawn_git_scan(gen, false, false);
     }
 
     fn rebuild_sync_ghosts(&self) {
@@ -848,6 +911,10 @@ impl FolderTab {
         self.directory.set_monitored(true);
         self.refresh_sync_ui();
         self.update_status();
+        if let Some(path) = self.location_path() {
+            git_status::invalidate_under(&path);
+        }
+        self.start_git_scan(true, true);
     }
 
     pub fn pause_directory_monitor(&self) {
@@ -1210,6 +1277,58 @@ fn apply_cut_row_style(row: &impl IsA<gtk::Widget>, info: &gio::FileInfo) {
     }
 }
 
+fn git_state_for_info(info: &gio::FileInfo) -> Option<GitDecor> {
+    let file = resolve_file(info, None)?;
+    let path = file.path()?;
+    git_status::state_for_path(&path, is_directory(info))
+}
+
+fn apply_git_classes(row: &impl IsA<gtk::Widget>, state: Option<GitDecor>) {
+    set_git_css_classes(row.upcast_ref(), state);
+    let mut child = row.first_child();
+    while let Some(c) = child {
+        let next = c.next_sibling();
+        if c.has_css_class("git-name") || c.is::<gtk::Label>() {
+            set_git_css_classes(&c, state);
+        }
+        child = next;
+    }
+}
+
+fn set_git_css_classes(widget: &gtk::Widget, state: Option<GitDecor>) {
+    widget.remove_css_class("git-untracked");
+    widget.remove_css_class("git-modified");
+    widget.remove_css_class("git-conflict");
+    if let Some(state) = state {
+        widget.add_css_class(state.css_class());
+    }
+}
+
+fn apply_git_row_style(row: &impl IsA<gtk::Widget>, info: &gio::FileInfo) {
+    apply_git_classes(row, git_state_for_info(info));
+}
+
+/// Apply git name colors on every `.file-row-content` under `root`.
+fn restyle_git_rows(root: &gtk::Widget) {
+    if root.has_css_class("file-row-content") {
+        let state = unsafe {
+            root.data::<Rc<RefCell<Option<(gio::File, bool, PathBuf)>>>>("file-target")
+                .and_then(|ptr| {
+                    ptr.as_ref().borrow().as_ref().and_then(|(_, is_dir, path)| {
+                        git_status::state_for_path(path, *is_dir)
+                    })
+                })
+        };
+        apply_git_classes(root, state);
+    }
+    let mut child = root.first_child();
+    while let Some(c) = child {
+        let next = c.next_sibling();
+        restyle_git_rows(&c);
+        child = next;
+    }
+}
+
 /// Apply / clear `clipboard-cut` on every `.file-row-content` under `root`.
 fn restyle_cut_rows(root: &gtk::Widget) {
     if root.has_css_class("file-row-content") {
@@ -1283,6 +1402,9 @@ fn apply_item_tooltip(widget: &impl IsA<gtk::Widget>, info: &gio::FileInfo) {
     }
     if !can_write(info) {
         parts.push("Read-only — you don't have permission to edit".to_string());
+    }
+    if let Some(git) = git_state_for_info(info) {
+        parts.push(git.label().to_string());
     }
     if parts.is_empty() {
         widget.set_tooltip_text(None);
@@ -1618,6 +1740,7 @@ fn build_tree_column_view(
             icon_overlay.add_overlay(&sync_em);
             icon_overlay.set_can_target(false);
             let label = gtk::Label::new(None);
+            label.add_css_class("git-name");
             label.set_xalign(0.0);
             label.set_ellipsize(gtk::pango::EllipsizeMode::End);
             label.set_hexpand(true);
@@ -1806,8 +1929,13 @@ fn build_tree_column_view(
             apply_sync_emblem(&sync_em, &info);
             apply_sync_row_style(&row, &info);
             apply_cut_row_style(&row, &info);
+            apply_git_row_style(&row, &info);
             if let Some(state) = sync_state_for_info(&info) {
-                let tip = format!("{}\n{}", display_name(&info), state.label());
+                let mut tip = format!("{}\n{}", display_name(&info), state.label());
+                if let Some(git) = git_state_for_info(&info) {
+                    tip.push('\n');
+                    tip.push_str(git.label());
+                }
                 row.set_tooltip_text(Some(&tip));
             }
 
@@ -2009,6 +2137,7 @@ fn build_grid_view(
         icon_overlay.set_halign(gtk::Align::Center);
         icon_overlay.set_can_target(false);
         let label = gtk::Label::new(None);
+        label.add_css_class("git-name");
         label.set_wrap(true);
         label.set_justify(gtk::Justification::Center);
         label.set_lines(2);
@@ -2192,6 +2321,7 @@ fn build_grid_view(
         apply_sync_emblem(&sync_em, &info);
         apply_sync_row_style(&box_, &info);
         apply_cut_row_style(&box_, &info);
+        apply_git_row_style(&box_, &info);
         if let Some(file) = resolve_file(&info, None) {
             let path = file.path().unwrap_or_default();
             let is_dir = is_directory(&info);

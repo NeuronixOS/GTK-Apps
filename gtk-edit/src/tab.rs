@@ -228,6 +228,11 @@ pub fn apply_view_config(view: &sourceview5::View, cfg: &EditorConfig) {
     } else {
         pango::FontDescription::from_string(&cfg.editor_font)
     };
+    // Pango family is "Cascadia Mono"; "Cascadia Mono Bold" is a weight, not a
+    // family (fc-match falls through to Noto Sans). Never put "Noto Color Emoji"
+    // in this list: Color Emoji fonts claim ASCII digits (keycaps), so 0-9 pick
+    // the emoji face and render as spaced/blank bitmaps. Emoji codepoints still
+    // fall back through fontconfig.
     let family = font
         .family()
         .unwrap_or_else(|| "Monospace".into())
@@ -241,8 +246,11 @@ pub fn apply_view_config(view: &sourceview5::View, cfg: &EditorConfig) {
             12.0
         }
     };
+    let weight = glib::translate::IntoGlib::into_glib(font.weight());
     let css = format!(
-        "textview.gtk-edit-view {{ font-family: \"{family}\", \"Noto Color Emoji\", emoji, monospace; font-size: {size_pt}pt; }}"
+        "textview.gtk-edit-view, textview.gtk-edit-view text {{\
+         font-family: \"{family}\", ui-monospace, monospace;\
+         font-size: {size_pt}pt; font-weight: {weight}; }}"
     );
     let provider = gtk::CssProvider::new();
     provider.load_from_data(&css);
@@ -255,7 +263,9 @@ pub fn apply_view_config(view: &sourceview5::View, cfg: &EditorConfig) {
                 ctx.remove_provider(old.as_ref());
             }
         }
-        ctx.add_provider(&provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        // USER beats suite chrome (USER-10) so the editor font actually applies
+        // to the GTK4 `text` node.
+        ctx.add_provider(&provider, gtk::STYLE_PROVIDER_PRIORITY_USER);
     }
     unsafe {
         view.set_data("gtk-edit-font-provider", provider);

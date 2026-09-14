@@ -23,6 +23,7 @@ Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/N
 - Drag and drop files (out to other apps, into folders / current view)
 - Context menus, preferences (TOML), keyboard shortcuts
 - Multi-window support
+- Git status name colors: **blue** new/untracked, **orange** modified, **red** conflict — folders bubble the worst status from nested `.git` repos
 
 ## Requirements
 
@@ -104,7 +105,7 @@ Thumbnail sizes in grid view: `small` (48px), `medium` (64px), `large` (96px), `
 | Sync ✕ / eject | Uninstall local server; disconnect client (files kept) |
 | Sync folder emblems / Sync column | Up to date, Syncing, Pending, Deleted (from client status.json) |
 | Context → Show Deleted | Ghost tombstone rows (dimmed); Restore Previous Version… |
-| `Ctrl+R` / `F5` | Reload |
+| `Ctrl+R` / `F5` | Reload (also refreshes git name colors) |
 | `Ctrl+T` / `Ctrl+W` | New / close tab |
 | `Ctrl+N` | New window |
 | `Ctrl+Shift+N` | New folder |
@@ -127,6 +128,7 @@ Thumbnail sizes in grid view: `small` (48px), `medium` (64px), `large` (96px), `
 | `window` | Main window, menus, actions, tabs |
 | `sync_setup` | Launch gtk-sync install dialog; probe systemd server/client status |
 | `tab` | `GtkDirectoryList` + list/grid views, filter, sort |
+| `git_status` | Cached `.git` discovery + porcelain name colors |
 | `sidebar` | Places / bookmarks |
 | `pathbar` | Breadcrumbs + location entry |
 | `file_ops` | Create, rename, trash, delete, paste |
