@@ -57,12 +57,18 @@ struct Ui {
     fg_hex: gtk::Entry,
     bg_btn: gtk::ColorDialogButton,
     bg_hex: gtk::Entry,
+    active_border_btns: Vec<gtk::ColorDialogButton>,
+    active_border_hex: Vec<gtk::Entry>,
+    inactive_border_btns: Vec<gtk::ColorDialogButton>,
+    inactive_border_hex: Vec<gtk::Entry>,
     pal_btns: Vec<gtk::ColorDialogButton>,
     pal_hex: Vec<gtk::Entry>,
 
     palette_area: gtk::DrawingArea,
     fg_swatch: gtk::DrawingArea,
     bg_swatch: gtk::DrawingArea,
+    active_border_swatch: gtk::DrawingArea,
+    inactive_border_swatch: gtk::DrawingArea,
 
     delete_btn: gtk::Button,
     status: gtk::Label,
@@ -89,7 +95,7 @@ fn show_about(app: &gtk::Application) {
         .program_name("GTK Theme Editor")
         .version(env!("CARGO_PKG_VERSION"))
         .comments(
-            "Edit suite color profiles (foreground, background, and 16-color palette) for Neuronix GTK-Apps.",
+            "Edit suite color profiles (foreground, background, active/inactive window-border gradients, and 16-color palette) for Neuronix GTK-Apps.",
         )
         .authors([SUITE_AUTHOR])
         .website(SUITE_WEBSITE)
@@ -111,7 +117,7 @@ fn build_ui(app: &gtk::Application) {
         .application(app)
         .title("GTK Theme Editor")
         .default_width(960)
-        .default_height(660)
+        .default_height(720)
         .build();
 
     // ---- header bar ----------------------------------------------------
@@ -165,6 +171,26 @@ fn build_ui(app: &gtk::Application) {
     editor.append(&bg_row);
 
     editor.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let border_heading = gtk::Label::new(Some("Window borders"));
+    border_heading.set_xalign(0.0);
+    border_heading.add_css_class("heading");
+    editor.append(&border_heading);
+    let border_hint = gtk::Label::new(Some(
+        "Hyprland draws a two-color 45° gradient around each window. Active is the focused ring; Inactive is every other window.",
+    ));
+    border_hint.set_xalign(0.0);
+    border_hint.set_wrap(true);
+    border_hint.add_css_class("dim-label");
+    editor.append(&border_hint);
+
+    let (active_border_btns, active_border_hex, active_section) =
+        gradient_pair_fields("Active window", "Color 1", "Color 2");
+    let (inactive_border_btns, inactive_border_hex, inactive_section) =
+        gradient_pair_fields("Inactive window", "Color 1", "Color 2");
+    editor.append(&active_section);
+    editor.append(&inactive_section);
+
+    editor.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     let pal_heading = gtk::Label::new(Some("Palette (ANSI 0–15)"));
     pal_heading.set_xalign(0.0);
     pal_heading.add_css_class("heading");
@@ -209,7 +235,8 @@ fn build_ui(app: &gtk::Application) {
     editor_scroll.set_vexpand(true);
 
     // ---- preview column ------------------------------------------------
-    let (preview, palette_area, fg_swatch, bg_swatch) = build_preview();
+    let (preview, palette_area, fg_swatch, bg_swatch, active_border_swatch, inactive_border_swatch) =
+        build_preview();
 
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     paned.set_start_child(Some(&editor_scroll));
@@ -249,11 +276,17 @@ fn build_ui(app: &gtk::Application) {
         fg_hex,
         bg_btn,
         bg_hex,
+        active_border_btns,
+        active_border_hex,
+        inactive_border_btns,
+        inactive_border_hex,
         pal_btns,
         pal_hex,
         palette_area,
         fg_swatch,
         bg_swatch,
+        active_border_swatch,
+        inactive_border_swatch,
         delete_btn,
         status,
     });
@@ -261,6 +294,10 @@ fn build_ui(app: &gtk::Application) {
     wire_preview(&ui);
     wire_color_field(&ui, Field::Foreground);
     wire_color_field(&ui, Field::Background);
+    for i in 0..2 {
+        wire_color_field(&ui, Field::ActiveBorder(i));
+        wire_color_field(&ui, Field::InactiveBorder(i));
+    }
     for i in 0..16 {
         wire_color_field(&ui, Field::Palette(i));
     }
@@ -306,7 +343,35 @@ fn color_field(label: &str) -> (gtk::ColorDialogButton, gtk::Entry, gtk::Box) {
     (btn, hex, row)
 }
 
-fn build_preview() -> (gtk::Box, gtk::DrawingArea, gtk::DrawingArea, gtk::DrawingArea) {
+fn gradient_pair_fields(
+    heading: &str,
+    label_a: &str,
+    label_b: &str,
+) -> (Vec<gtk::ColorDialogButton>, Vec<gtk::Entry>, gtk::Box) {
+    let section = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let h = gtk::Label::new(Some(heading));
+    h.set_xalign(0.0);
+    h.add_css_class("dim-label");
+    section.append(&h);
+    let mut btns = Vec::with_capacity(2);
+    let mut hexes = Vec::with_capacity(2);
+    for label in [label_a, label_b] {
+        let (btn, hex, row) = color_field(label);
+        section.append(&row);
+        btns.push(btn);
+        hexes.push(hex);
+    }
+    (btns, hexes, section)
+}
+
+fn build_preview() -> (
+    gtk::Box,
+    gtk::DrawingArea,
+    gtk::DrawingArea,
+    gtk::DrawingArea,
+    gtk::DrawingArea,
+    gtk::DrawingArea,
+) {
     let preview = gtk::Box::new(gtk::Orientation::Vertical, 12);
     preview.set_margin_top(16);
     preview.set_margin_bottom(16);
@@ -431,6 +496,13 @@ fn build_preview() -> (gtk::Box, gtk::DrawingArea, gtk::DrawingArea, gtk::Drawin
     swatch_row.append(&bg_box);
     preview.append(&swatch_row);
 
+    let border_swatch_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let (active_box, active_border_swatch) = labeled_swatch("Active border");
+    let (inactive_box, inactive_border_swatch) = labeled_swatch("Inactive border");
+    border_swatch_row.append(&active_box);
+    border_swatch_row.append(&inactive_box);
+    preview.append(&border_swatch_row);
+
     // Palette strip
     let pal_label = gtk::Label::new(Some("ANSI palette (slot 4 = accent)"));
     pal_label.set_xalign(0.0);
@@ -441,7 +513,7 @@ fn build_preview() -> (gtk::Box, gtk::DrawingArea, gtk::DrawingArea, gtk::Drawin
     palette_area.set_hexpand(true);
     preview.append(&palette_area);
 
-    (preview, palette_area, fg_swatch, bg_swatch)
+    (preview, palette_area, fg_swatch, bg_swatch, active_border_swatch, inactive_border_swatch)
 }
 
 fn labeled_swatch(label: &str) -> (gtk::Box, gtk::DrawingArea) {
@@ -465,6 +537,8 @@ fn labeled_swatch(label: &str) -> (gtk::Box, gtk::DrawingArea) {
 enum Field {
     Foreground,
     Background,
+    ActiveBorder(usize),
+    InactiveBorder(usize),
     Palette(usize),
 }
 
@@ -473,6 +547,8 @@ impl Field {
         match self {
             Field::Foreground => (&ui.fg_btn, &ui.fg_hex),
             Field::Background => (&ui.bg_btn, &ui.bg_hex),
+            Field::ActiveBorder(i) => (&ui.active_border_btns[*i], &ui.active_border_hex[*i]),
+            Field::InactiveBorder(i) => (&ui.inactive_border_btns[*i], &ui.inactive_border_hex[*i]),
             Field::Palette(i) => (&ui.pal_btns[*i], &ui.pal_hex[*i]),
         }
     }
@@ -482,6 +558,8 @@ impl Field {
         match self {
             Field::Foreground => w.foreground = hex,
             Field::Background => w.background = hex,
+            Field::ActiveBorder(i) => w.set_active_border_stop(*i, hex),
+            Field::InactiveBorder(i) => w.set_inactive_border_stop(*i, hex),
             Field::Palette(i) => {
                 if w.palette.len() < 16 {
                     w.palette.resize(16, "#000000".to_string());
@@ -507,6 +585,7 @@ fn wire_color_field(ui: &Rc<Ui>, field: Field) {
             field.get(&ui).1.set_text(&value);
             ui.updating.set(false);
             apply_live(&ui);
+            preview_border_if_needed(&ui, field);
         });
     }
     {
@@ -527,6 +606,7 @@ fn wire_color_field(ui: &Rc<Ui>, field: Field) {
             field.get(&ui).0.set_rgba(&rgba);
             ui.updating.set(false);
             apply_live(&ui);
+            preview_border_if_needed(&ui, field);
         });
     }
 }
@@ -616,6 +696,30 @@ fn wire_preview(ui: &Rc<Ui>) {
             draw_single(cr, w, h, &u.working.borrow().background);
         });
     }
+    {
+        let area = ui.active_border_swatch.clone();
+        let u = ui.clone();
+        area.set_draw_func(move |_, cr, w, h| {
+            let data = u.working.borrow();
+            let [a, b] = data.active_border_stops().unwrap_or_else(|| {
+                let h = data.border_hex();
+                [h.clone(), h]
+            });
+            draw_gradient(cr, w, h, &a, &b);
+        });
+    }
+    {
+        let area = ui.inactive_border_swatch.clone();
+        let u = ui.clone();
+        area.set_draw_func(move |_, cr, w, h| {
+            let data = u.working.borrow();
+            let [c0, c1] = data.inactive_border_stops().unwrap_or_else(|| {
+                let x = data.background.clone();
+                [x.clone(), x]
+            });
+            draw_gradient(cr, w, h, &c0, &c1);
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -625,14 +729,31 @@ fn wire_preview(ui: &Rc<Ui>) {
 /// Push a full profile into every widget without triggering edit handlers.
 fn load_into_fields(ui: &Rc<Ui>, data: ProfileData) {
     ui.updating.set(true);
-    *ui.working.borrow_mut() = data.clone();
-    ui.name_entry.set_text(&data.name);
-    set_swatch(&ui.fg_btn, &ui.fg_hex, &data.foreground);
-    set_swatch(&ui.bg_btn, &ui.bg_hex, &data.background);
-    let pal = data.normalized_palette();
+    let mut seeded = data.clone();
+    seeded.seed_window_borders();
+    ui.name_entry.set_text(&seeded.name);
+    set_swatch(&ui.fg_btn, &ui.fg_hex, &seeded.foreground);
+    set_swatch(&ui.bg_btn, &ui.bg_hex, &seeded.background);
+    let active = seeded
+        .active_border_stops()
+        .unwrap_or_else(|| [seeded.border_hex(), seeded.border_hex()]);
+    let inactive = seeded.inactive_border_stops().unwrap_or_else(|| {
+        let a = seeded.background.clone();
+        [a.clone(), a]
+    });
+    for i in 0..2 {
+        set_swatch(&ui.active_border_btns[i], &ui.active_border_hex[i], &active[i]);
+        set_swatch(
+            &ui.inactive_border_btns[i],
+            &ui.inactive_border_hex[i],
+            &inactive[i],
+        );
+    }
+    let pal = seeded.normalized_palette();
     for i in 0..16 {
         set_swatch(&ui.pal_btns[i], &ui.pal_hex[i], &pal[i]);
     }
+    *ui.working.borrow_mut() = seeded;
     ui.updating.set(false);
     apply_live(ui);
     update_delete_sensitivity(ui);
@@ -699,6 +820,14 @@ fn apply_live(ui: &Rc<Ui>) {
     ui.palette_area.queue_draw();
     ui.fg_swatch.queue_draw();
     ui.bg_swatch.queue_draw();
+    ui.active_border_swatch.queue_draw();
+    ui.inactive_border_swatch.queue_draw();
+}
+
+fn preview_border_if_needed(ui: &Rc<Ui>, field: Field) {
+    if matches!(field, Field::ActiveBorder(_) | Field::InactiveBorder(_)) {
+        gtk_theme::preview_window_border(&ui.working.borrow());
+    }
 }
 
 fn set_status(ui: &Rc<Ui>, text: &str) {
@@ -725,6 +854,20 @@ fn rgba_to_hex(c: &gdk::RGBA) -> String {
 fn draw_single(cr: &cairo::Context, w: i32, h: i32, hex: &str) {
     let rgba = hex.parse::<gdk::RGBA>().unwrap_or(gdk::RGBA::BLACK);
     cr.set_source_rgb(rgba.red() as f64, rgba.green() as f64, rgba.blue() as f64);
+    let _ = cr.paint();
+    cr.set_source_rgba(0.5, 0.5, 0.5, 0.4);
+    cr.set_line_width(1.0);
+    cr.rectangle(0.5, 0.5, (w - 1) as f64, (h - 1) as f64);
+    let _ = cr.stroke();
+}
+
+fn draw_gradient(cr: &cairo::Context, w: i32, h: i32, a: &str, b: &str) {
+    let ra = a.parse::<gdk::RGBA>().unwrap_or(gdk::RGBA::BLACK);
+    let rb = b.parse::<gdk::RGBA>().unwrap_or(gdk::RGBA::BLACK);
+    let pat = cairo::LinearGradient::new(0.0, 0.0, w as f64, h as f64);
+    pat.add_color_stop_rgb(0.0, ra.red() as f64, ra.green() as f64, ra.blue() as f64);
+    pat.add_color_stop_rgb(1.0, rb.red() as f64, rb.green() as f64, rb.blue() as f64);
+    let _ = cr.set_source(&pat);
     let _ = cr.paint();
     cr.set_source_rgba(0.5, 0.5, 0.5, 0.4);
     cr.set_line_width(1.0);

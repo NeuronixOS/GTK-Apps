@@ -59,6 +59,9 @@ class Profile:
     foreground: str
     background: str
     palette: tuple[str, ...]
+    border: Optional[str] = None
+    border_active: Optional[tuple[str, str]] = None
+    border_inactive: Optional[tuple[str, str]] = None
 
     def is_dark(self) -> bool:
         return _relative_luminance(self.background) < 0.45
@@ -69,9 +72,61 @@ class Profile:
     def surface_alt_hex(self) -> str:
         return _mix_hex(self.background, self.foreground, 0.18)
 
+    def border_active_stops(self) -> tuple[str, str]:
+        """Focused Hyprland outline — two ``#rrggbb`` stops."""
+        if self.border_active:
+            return self.border_active
+        one = _normalize_hex(self.border)
+        if one:
+            return (one, one)
+        a = self.surface_alt_hex()
+        b = _mix_hex(a, self.foreground, 0.35)
+        return (a, b)
+
+    def border_inactive_stops(self) -> tuple[str, str]:
+        """Unfocused Hyprland outline — two ``#rrggbb`` stops."""
+        if self.border_inactive:
+            return self.border_inactive
+        a = self.surface_hex()
+        b = _mix_hex(a, self.background, 0.40)
+        return (a, b)
+
+    def border_hex(self) -> str:
+        """First active stop (legacy single-color callers)."""
+        return self.border_active_stops()[0]
+
+    def hypr_active_border(self) -> Optional[str]:
+        a, b = self.border_active_stops()
+        return _hypr_gradient(a, b)
+
+    def hypr_inactive_border(self) -> Optional[str]:
+        a, b = self.border_inactive_stops()
+        return _hypr_gradient(a, b)
+
     def accent(self) -> str:
         """Suite accent (ANSI blue / palette[4]) — Adwaita --accent-blue."""
         return self.palette[4] if len(self.palette) > 4 else "#458588"
+
+
+def _normalize_hex(value: object) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if raw.startswith("#"):
+        raw = raw[1:]
+    if len(raw) == 6 and all(c in "0123456789abcdefABCDEF" for c in raw):
+        return f"#{raw.lower()}"
+    return None
+
+
+def _parse_stops(raw: object) -> Optional[tuple[str, str]]:
+    if not isinstance(raw, list) or not raw:
+        return None
+    a = _normalize_hex(raw[0])
+    if not a:
+        return None
+    b = _normalize_hex(raw[1]) if len(raw) > 1 else None
+    return (a, b or a)
 
 
 def builtin_profiles() -> list[Profile]:
@@ -119,6 +174,9 @@ def _load_custom_profiles() -> list[Profile]:
                     foreground=p["foreground"],
                     background=p["background"],
                     palette=palette[:16],
+                    border=p.get("border") or None,
+                    border_active=_parse_stops(p.get("border_active")),
+                    border_inactive=_parse_stops(p.get("border_inactive")),
                 )
             )
         except (KeyError, TypeError):
@@ -669,11 +727,30 @@ def sync_hyprbars_colors(bar_hex: str, text_hex: str) -> bool:
 
 
 def _hyprland_conf_path() -> Optional[Path]:
-    xdg = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    for cand in (xdg / "hypr" / "hyprland.conf", Path.home() / "configs" / "hypr" / "hyprland.conf"):
-        if cand.is_file():
-            return cand
+    for path in _hypr_conf_paths():
+        if path.name == "hyprland.conf":
+            return path
     return None
+
+
+def _hypr_conf_paths() -> list[Path]:
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for folder in (xdg / "hypr", Path.home() / "configs" / "hypr"):
+        for name in ("hyprland.conf", "binds-personal.conf"):
+            cand = folder / name
+            if not cand.is_file():
+                continue
+            try:
+                key = cand.resolve()
+            except OSError:
+                key = cand
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(cand)
+    return out
 
 
 def _hex_to_hypr_rgb(hex_color: str) -> Optional[str]:
@@ -803,10 +880,15 @@ def sync_shell_chrome(profile: Optional[Profile] = None) -> bool:
     border = profile.surface_alt_hex()
     surface = profile.surface_hex()
     accent = profile.accent()
-    _sync_waybar_style(bg, fg, border, surface)
+    i0, i1 = profile.border_inactive_stops()
+    _sync_waybar_style(bg, fg, border, surface, i0, i1)
     _sync_mako_colors(bg, fg, border)
-    _sync_fuzzel_colors(bg, fg, border, surface, accent)
-    _sync_hypr_window_borders(border, surface)
+    # Fuzzel chrome matches window inactive border + Hypr rounding.
+    _sync_fuzzel_colors(bg, fg, i0, surface, accent)
+    active = profile.hypr_active_border()
+    inactive = profile.hypr_inactive_border()
+    if active and inactive:
+        _sync_hypr_window_borders(active, inactive, profile.border_hex())
     _sync_gtk_user_css(profile)
     # On profile change: drop cached GTK dialogs / portal. During session start
     # (NEURONIX_THEME_NO_HYPR_RELOAD) skip — portal/waybar bring-up already races.
@@ -1377,7 +1459,8 @@ def _rewrite_waybar_global_colors(css: str, fg: str, surface: str) -> str:
 
 
 def _restart_waybar() -> None:
-    # Session start already launched waybar; killall+respawn there freezes Hyprland.
+    # Prefer the user unit so style.css reloads cleanly. SIGUSR2 alone often
+    # leaves a stale bar; bare killall+spawn can leave zombies.
     if _theme_session_safe():
         if shutil.which("killall"):
             try:
@@ -1393,6 +1476,19 @@ def _restart_waybar() -> None:
                 pass
         return
     try:
+        r = subprocess.run(
+            ["systemctl", "--user", "restart", "waybar.service"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=8,
+        )
+        if r.returncode == 0:
+            return
+    except Exception:
+        pass
+    try:
         subprocess.run(
             ["killall", "waybar"],
             stdin=subprocess.DEVNULL,
@@ -1403,7 +1499,20 @@ def _restart_waybar() -> None:
         )
     except Exception:
         pass
-    time.sleep(0.15)
+    time.sleep(0.2)
+    try:
+        r = subprocess.run(
+            ["hyprctl", "dispatch", "exec", "waybar"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=3,
+        )
+        if r.returncode == 0:
+            return
+    except Exception:
+        pass
     try:
         subprocess.Popen(
             ["waybar"],
@@ -1416,7 +1525,9 @@ def _restart_waybar() -> None:
         pass
 
 
-def _sync_waybar_style(bg: str, fg: str, border: str, surface: str) -> None:
+def _sync_waybar_style(
+    bg: str, fg: str, border: str, surface: str, inactive0: str, inactive1: str
+) -> None:
     paths = _all_existing_configs("waybar/style.css")
     if not paths:
         return
@@ -1429,7 +1540,17 @@ def _sync_waybar_style(bg: str, fg: str, border: str, surface: str) -> None:
         out = _rewrite_css_block(
             out,
             "window#waybar",
-            f"  background-color: {bg};\n  color: {fg};\n  border-bottom: 2px solid {border};",
+            f"  background-color: {bg};\n  color: {fg};\n"
+            f"  border-bottom: none;\n  padding-bottom: 10px;\n"
+            f"  background-image: linear-gradient(\n"
+            f"    90deg,\n"
+            f"    {inactive1} 0%,\n"
+            f"    {inactive0} 50%,\n"
+            f"    {inactive1} 100%\n"
+            f"  );\n"
+            f"  background-size: 100% 10px;\n"
+            f"  background-position: left bottom;\n"
+            f"  background-repeat: no-repeat;",
         )
         out = _rewrite_css_block(
             out,
@@ -1455,6 +1576,30 @@ def _replace_ini_assign(text: str, key: str, value: str) -> str:
         trimmed = bare.lstrip()
         indent = bare[: len(bare) - len(trimmed)]
         if trimmed.startswith(prefix):
+            out.append(f"{indent}{key}={value}{nl or chr(10)}")
+        else:
+            out.append(line)
+    return "".join(out)
+
+
+def _replace_ini_section_assign(text: str, section: str, key: str, value: str) -> str:
+    """Replace key=value only inside [section] (avoids clobbering e.g. main width)."""
+    header = f"[{section}]"
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    in_section = False
+    prefix = f"{key}="
+    for line in lines:
+        bare = line.rstrip("\r\n")
+        nl = line[len(bare) :]
+        trimmed = bare.strip()
+        if trimmed.startswith("[") and trimmed.endswith("]"):
+            in_section = trimmed == header
+            out.append(line)
+            continue
+        left = bare.lstrip()
+        indent = bare[: len(bare) - len(left)]
+        if in_section and left.startswith(prefix):
             out.append(f"{indent}{key}={value}{nl or chr(10)}")
         else:
             out.append(line)
@@ -1515,6 +1660,9 @@ def _sync_fuzzel_colors(bg: str, fg: str, border: str, surface: str, accent: str
     out = _replace_ini_assign(out, "selection-text", _bare_rgba(fg))
     out = _replace_ini_assign(out, "match", _bare_rgba(accent))
     out = _replace_ini_assign(out, "selection-match", _bare_rgba(accent))
+    # Match Hyprland window border_size / rounding.
+    out = _replace_ini_section_assign(out, "border", "width", "10")
+    out = _replace_ini_section_assign(out, "border", "radius", "8")
     if out != original:
         try:
             path.write_text(out, encoding="utf-8")
@@ -1529,30 +1677,32 @@ def _hex_to_hypr_rgba(hex_color: str, alpha: str) -> Optional[str]:
     return f"rgba({h.lower()}{alpha})"
 
 
-def _sync_hypr_window_borders(border: str, surface: str) -> None:
-    active = _hex_to_hypr_rgba(border, "aa")
-    inactive = _hex_to_hypr_rgba(surface, "88")
-    if not active or not inactive:
-        return
-    path = _hyprland_conf_path()
-    if path is not None:
+def _hypr_gradient(a: str, b: str) -> Optional[str]:
+    aa = _hex_to_hypr_rgba(a, "ff")
+    bb = _hex_to_hypr_rgba(b, "ff")
+    if not aa or not bb:
+        return None
+    return f"{aa} {bb} 45deg"
+
+
+def _sync_hypr_window_borders(active: str, inactive: str, panel_hex: str) -> None:
+    panel = _hex_to_hypr_rgba(panel_hex, "ff")
+    for path in _hypr_conf_paths():
         try:
             original = path.read_text(encoding="utf-8")
         except OSError:
-            original = None
-        if original is not None:
-            out = original
-            out = _replace_hypr_assign(out, "col.active_border", active)
-            out = _replace_hypr_assign(out, "col.inactive_border", inactive)
-            out = _replace_hypr_assign(out, "panelBorderColor", active)
-            inactive_ws = _hex_to_hypr_rgba(border, "ff")
-            if inactive_ws:
-                out = _replace_hypr_assign(out, "workspaceInactiveBorder", inactive_ws)
-            if out != original:
-                try:
-                    path.write_text(out, encoding="utf-8")
-                except OSError:
-                    pass
+            continue
+        out = original
+        out = _replace_hypr_assign(out, "col.active_border", active)
+        out = _replace_hypr_assign(out, "col.inactive_border", inactive)
+        if panel:
+            out = _replace_hypr_assign(out, "panelBorderColor", panel)
+            out = _replace_hypr_assign(out, "workspaceInactiveBorder", panel)
+        if out != original:
+            try:
+                path.write_text(out, encoding="utf-8")
+            except OSError:
+                pass
     if not _theme_session_safe():
         _hyprctl_keyword("general:col.active_border", active)
         _hyprctl_keyword("general:col.inactive_border", inactive)

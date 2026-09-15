@@ -1,0 +1,5 @@
+Name: libjpeg
+Description: stub for pkgconf Requires.private (runtime .so already on the system)
+Version: 1.0
+Libs:
+Cflags:

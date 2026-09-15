@@ -46,10 +46,27 @@ Apps: gtk-calc gtk-edit gtk-files gtk-image gtk-video gtk-term gtk-theme-editor
 EOF
 }
 
-# Ensure cargo is on PATH when launched from a minimal shell.
+# Ensure cargo is on PATH when launched from a minimal shell or via sudo.
+# `sudo ./build-launch.sh` keeps root's HOME, so ~/.cargo/env would miss the
+# real user's rustup.
 if ! command -v cargo >/dev/null 2>&1; then
-  # shellcheck source=/dev/null
-  [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
+  _cargo_homes=("$HOME")
+  if [[ -n "${SUDO_USER:-}" ]]; then
+    _sudo_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
+    [[ -n "${_sudo_home:-}" ]] && _cargo_homes+=("$_sudo_home")
+  fi
+  for _h in "${_cargo_homes[@]}"; do
+    if [[ -f "$_h/.cargo/env" ]]; then
+      # shellcheck source=/dev/null
+      source "$_h/.cargo/env"
+      break
+    fi
+  done
+  unset _cargo_homes _sudo_home _h
+fi
+if ! command -v cargo >/dev/null 2>&1 && [[ -x /home/khinds/.cargo/bin/cargo ]]; then
+  export PATH="/home/khinds/.cargo/bin:${PATH}"
+  export CARGO_HOME="${CARGO_HOME:-/home/khinds/.cargo}"
 fi
 
 # Suite apps (gtk-theme / gtk-neuron are libraries — not launched as windows).
@@ -246,14 +263,30 @@ stop_apps() {
 }
 
 # Prefer system pkg-config; fall back to gtk-edit's vendored .deps if present.
+# Always keep the default multiarch pkgconfig dir so Requires.private (libjpeg,
+# …) still resolve when PKG_CONFIG_PATH is set. Stubs cover missing -dev .pc
+# files when the runtime libraries are already installed.
 setup_pkg_config() {
-  if pkg-config --exists gtksourceview-5 2>/dev/null; then
-    return
-  fi
   local deps_pc="$ROOT/gtk-edit/.deps/usr/lib/x86_64-linux-gnu/pkgconfig"
-  if [[ -f "$deps_pc/gtksourceview-5.pc" ]]; then
+  local stubs_pc="$ROOT/share/pkgconfig-stubs"
+  local sys_pc="/usr/lib/x86_64-linux-gnu/pkgconfig"
+  local extra=()
+  [[ -d "$stubs_pc" ]] && extra+=("$stubs_pc")
+  if ! pkg-config --exists gtksourceview-5 2>/dev/null && [[ -f "$deps_pc/gtksourceview-5.pc" ]]; then
     echo "==> Using PKG_CONFIG_PATH from gtk-edit/.deps (system gtksourceview-5.pc missing)"
-    export PKG_CONFIG_PATH="${deps_pc}${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    extra+=("$deps_pc")
+  fi
+  extra+=("$sys_pc")
+  local joined
+  joined="$(IFS=:; echo "${extra[*]}")"
+  export PKG_CONFIG_PATH="${joined}${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+  # Unversioned libgtk-4.so etc. live here (system packages only ship SONAMEs).
+  # Do not add gtk-edit/.deps/.../lib: those -dev .so links are broken and
+  # rust-lld would pick them first.
+  local link_lib="$ROOT/share/lib-dev-links"
+  if [[ -d "$link_lib" ]]; then
+    export LIBRARY_PATH="${link_lib}${LIBRARY_PATH:+:$LIBRARY_PATH}"
+    export RUSTFLAGS="-L native=${link_lib} ${RUSTFLAGS:-}"
   fi
 }
 

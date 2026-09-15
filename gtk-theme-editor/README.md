@@ -3,10 +3,10 @@
 A GTK4 front-end for the shared [`gtk-theme`](../gtk-theme) suite color profiles.
 
 Load any built-in profile (Gruvbox, Tokyo Night, Dracula, Nord, …) or one of
-your own custom profiles, tweak the **foreground**, **background**, and the full
-**16-color ANSI palette**, and watch the whole window recolor as you edit. Save
-your result under a custom name and it becomes available in every GTK-Apps
-suite app's *Profile* menu.
+your own custom profiles, tweak the **foreground**, **background**, **window
+border**, and the full **16-color ANSI palette**, and watch the whole window
+recolor as you edit. Save your result under a custom name and it becomes
+available in every GTK-Apps suite app's *Profile* menu.
 
 Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/NeuronixOS/GTK-Apps)
 
@@ -17,8 +17,9 @@ Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/N
 - **Live preview** — every color change re-themes the editor chrome
   immediately (header bar, buttons, entries, list, scrollbars) plus a dedicated
   preview pane with a palette strip and foreground/background swatches.
-- **Edit everything** — foreground, background, and all 16 palette slots, each
-  with a color picker and a `#rrggbb` hex entry that stay in sync.
+- **Edit everything** — foreground, background, Hyprland window border, and all
+  16 palette slots, each with a color picker and a `#rrggbb` hex entry that stay
+  in sync. The window-border picker live-updates the compositor outline.
 - **Save with a custom name** — writes to
   `~/.config/gtk-apps/custom-profiles.json`. Re-saving a loaded custom profile
   edits it in place; editing a built-in creates a new custom profile.

@@ -72,6 +72,43 @@ impl Profile {
         mix_hex(self.background, self.foreground, 0.18)
     }
 
+    /// Hyprland focused outline — two-stop gradient. Custom profiles may set
+    /// this; built-ins mix surface_alt toward foreground.
+    pub fn border_active_stops(&self) -> [String; 2] {
+        if let Some(pair) = custom_profile_data(self.id).and_then(|d| d.active_border_stops()) {
+            return pair;
+        }
+        let a = self.surface_alt_hex();
+        let b = mix_hex(&a, self.foreground, 0.35);
+        [a, b]
+    }
+
+    /// Hyprland unfocused outline — two-stop gradient. Built-ins mix surface
+    /// toward background.
+    pub fn border_inactive_stops(&self) -> [String; 2] {
+        if let Some(pair) = custom_profile_data(self.id).and_then(|d| d.inactive_border_stops()) {
+            return pair;
+        }
+        let a = self.surface_hex();
+        let b = mix_hex(&a, self.background, 0.40);
+        [a, b]
+    }
+
+    /// First active stop (legacy single-color callers).
+    pub fn border_hex(&self) -> String {
+        self.border_active_stops()[0].clone()
+    }
+
+    pub fn hypr_active_border(&self) -> Option<String> {
+        let [a, b] = self.border_active_stops();
+        hypr_gradient(&a, &b)
+    }
+
+    pub fn hypr_inactive_border(&self) -> Option<String> {
+        let [a, b] = self.border_inactive_stops();
+        hypr_gradient(&a, &b)
+    }
+
     /// Suite accent — ANSI blue slot (palette[4]). Drives Adwaita
     /// `--accent-blue` / `blue_3`, file selection, and text highlights.
     pub fn accent(&self) -> &'static str {
@@ -88,6 +125,15 @@ pub struct ProfileData {
     pub foreground: String,
     pub background: String,
     pub palette: Vec<String>,
+    /// Legacy single Hyprland outline (migrated to `border_active[0]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border: Option<String>,
+    /// Focused window outline — two `#rrggbb` stops (Hyprland gradient).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border_active: Option<Vec<String>>,
+    /// Unfocused window outline — two `#rrggbb` stops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border_inactive: Option<Vec<String>>,
 }
 
 impl ProfileData {
@@ -99,7 +145,110 @@ impl ProfileData {
             foreground: p.foreground.to_string(),
             background: p.background.to_string(),
             palette: p.palette.iter().map(|c| c.to_string()).collect(),
+            border: Some(p.border_hex()),
+            border_active: Some(p.border_active_stops().to_vec()),
+            border_inactive: Some(p.border_inactive_stops().to_vec()),
         }
+    }
+
+    /// Fill missing window-border stops so the editor always has four hexes.
+    pub fn seed_window_borders(&mut self) {
+        let active = self.active_border_stops().unwrap_or_else(|| {
+            let a = self.border_hex();
+            [a.clone(), a]
+        });
+        let inactive = self.inactive_border_stops().unwrap_or_else(|| {
+            let a = mix_hex(&self.background, &self.foreground, 0.10);
+            let b = mix_hex(&a, &self.background, 0.40);
+            [a, b]
+        });
+        self.border_active = Some(active.to_vec());
+        self.border_inactive = Some(inactive.to_vec());
+        self.border = Some(active[0].clone());
+    }
+
+    fn valid_hex(s: &str) -> Option<String> {
+        let t = s.trim();
+        hex_digits(t)?;
+        if t.starts_with('#') {
+            Some(t.to_ascii_lowercase())
+        } else {
+            Some(format!("#{t}").to_ascii_lowercase())
+        }
+    }
+
+    fn pair_from(raw: Option<&Vec<String>>, fallback: [String; 2]) -> [String; 2] {
+        let mut out = fallback;
+        if let Some(v) = raw {
+            if let Some(a) = v.first().and_then(|s| Self::valid_hex(s)) {
+                out[0] = a.clone();
+                out[1] = v.get(1).and_then(|s| Self::valid_hex(s)).unwrap_or(a);
+            }
+        }
+        out
+    }
+
+    /// Focused gradient stops, or `None` if this profile never set them.
+    pub fn active_border_stops(&self) -> Option<[String; 2]> {
+        let fallback = mix_hex(&self.background, &self.foreground, 0.18);
+        if let Some(v) = &self.border_active {
+            if v.iter().any(|s| Self::valid_hex(s).is_some()) {
+                return Some(Self::pair_from(Some(v), [fallback.clone(), fallback]));
+            }
+        }
+        if let Some(one) = self.border.as_deref().and_then(Self::valid_hex) {
+            return Some([one.clone(), one]);
+        }
+        None
+    }
+
+    pub fn inactive_border_stops(&self) -> Option<[String; 2]> {
+        let v = self.border_inactive.as_ref()?;
+        if !v.iter().any(|s| Self::valid_hex(s).is_some()) {
+            return None;
+        }
+        let a = mix_hex(&self.background, &self.foreground, 0.10);
+        let b = mix_hex(&a, &self.background, 0.40);
+        Some(Self::pair_from(Some(v), [a, b]))
+    }
+
+    /// Hyprland window outline — first active stop (legacy).
+    pub fn border_hex(&self) -> String {
+        if let Some(pair) = self.active_border_stops() {
+            return pair[0].clone();
+        }
+        mix_hex(&self.background, &self.foreground, 0.18)
+    }
+
+    pub fn set_active_border_stop(&mut self, i: usize, hex: String) {
+        let mut pair = self
+            .active_border_stops()
+            .unwrap_or_else(|| [self.border_hex(), self.border_hex()]);
+        pair[i.min(1)] = hex;
+        self.border_active = Some(pair.to_vec());
+        self.border = Some(pair[0].clone());
+    }
+
+    pub fn set_inactive_border_stop(&mut self, i: usize, hex: String) {
+        let a = mix_hex(&self.background, &self.foreground, 0.10);
+        let b = mix_hex(&a, &self.background, 0.40);
+        let mut pair = self.inactive_border_stops().unwrap_or([a, b]);
+        pair[i.min(1)] = hex;
+        self.border_inactive = Some(pair.to_vec());
+    }
+
+    pub fn hypr_active_border(&self) -> Option<String> {
+        let [a, b] = self
+            .active_border_stops()
+            .unwrap_or_else(|| [self.border_hex(), self.border_hex()]);
+        hypr_gradient(&a, &b)
+    }
+
+    pub fn hypr_inactive_border(&self) -> Option<String> {
+        let a = mix_hex(&self.background, &self.foreground, 0.10);
+        let b = mix_hex(&a, &self.background, 0.40);
+        let [c0, c1] = self.inactive_border_stops().unwrap_or([a, b]);
+        hypr_gradient(&c0, &c1)
     }
 
     /// Suite accent — palette slot 4 (Blue / `--accent-blue`).
@@ -1696,16 +1845,33 @@ pub fn sync_hyprbars_colors(bar_hex: &str, text_hex: &str) -> bool {
 }
 
 fn hyprland_conf_path() -> Option<PathBuf> {
-    let candidates = [
-        dirs::config_dir().map(|d| d.join("hypr/hyprland.conf")),
-        dirs::home_dir().map(|d| d.join("configs/hypr/hyprland.conf")),
+    hypr_conf_paths()
+        .into_iter()
+        .find(|p| p.file_name().is_some_and(|n| n == "hyprland.conf"))
+}
+
+/// `hyprland.conf` plus `binds-personal.conf` (this workstation's 10px outline
+/// lives in the latter and would otherwise override the base file).
+fn hypr_conf_paths() -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let dirs = [
+        dirs::config_dir().map(|d| d.join("hypr")),
+        dirs::home_dir().map(|d| d.join("configs/hypr")),
     ];
-    for c in candidates.into_iter().flatten() {
-        if c.is_file() {
-            return Some(c);
+    for dir in dirs.into_iter().flatten() {
+        for name in ["hyprland.conf", "binds-personal.conf"] {
+            let path = dir.join(name);
+            if !path.is_file() {
+                continue;
+            }
+            let key = path.canonicalize().unwrap_or_else(|_| path.clone());
+            if seen.insert(key) {
+                out.push(path);
+            }
         }
     }
-    None
+    out
 }
 
 fn hex_to_hypr_rgb(hex: &str) -> Option<String> {
@@ -1876,10 +2042,16 @@ pub fn sync_shell_chrome(profile: &Profile) {
     let border = profile.surface_alt_hex();
     let surface = profile.surface_hex();
     let accent = profile.accent();
-    sync_waybar_style(bg, fg, &border, &surface);
+    let [inactive0, inactive1] = profile.border_inactive_stops();
+    sync_waybar_style(bg, fg, &border, &surface, &inactive0, &inactive1);
     sync_mako_colors(bg, fg, &border);
-    sync_fuzzel_colors(bg, fg, &border, &surface, accent);
-    sync_hypr_window_borders(&border, &surface);
+    // Fuzzel chrome matches window inactive border + Hypr rounding.
+    sync_fuzzel_colors(bg, fg, &inactive0, &surface, accent);
+    if let (Some(active), Some(inactive)) =
+        (profile.hypr_active_border(), profile.hypr_inactive_border())
+    {
+        sync_hypr_window_borders(&active, &inactive, &profile.border_hex());
+    }
     sync_gtk_user_css(profile);
     // File pickers / Power Manager cache GTK CSS — restart on profile change.
     // During session start skip: portal + waybar bring-up already races Hyprland.
@@ -1931,6 +2103,15 @@ pub fn sync_desktop_theme(profile: &Profile) {
     sync_shell_chrome(profile);
 }
 
+/// Live-update the Hyprland window outline from an in-progress editor profile
+/// (hyprctl only; configs are written on Apply via [`sync_shell_chrome`]).
+pub fn preview_window_border(data: &ProfileData) {
+    if let (Some(active), Some(inactive)) = (data.hypr_active_border(), data.hypr_inactive_border())
+    {
+        apply_hypr_window_border_keywords(&active, &inactive);
+    }
+}
+
 fn config_candidates(rel: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(d) = dirs::config_dir() {
@@ -1957,7 +2138,14 @@ fn existing_config_paths(rel: &str) -> Vec<PathBuf> {
     paths
 }
 
-fn sync_waybar_style(bg: &str, fg: &str, border: &str, surface: &str) {
+fn sync_waybar_style(
+    bg: &str,
+    fg: &str,
+    border: &str,
+    surface: &str,
+    inactive0: &str,
+    inactive1: &str,
+) {
     let paths = existing_config_paths("waybar/style.css");
     if paths.is_empty() {
         return;
@@ -1967,7 +2155,7 @@ fn sync_waybar_style(bg: &str, fg: &str, border: &str, surface: &str) {
             continue;
         };
         let mut out = original.clone();
-        out = rewrite_waybar_window_block(&out, bg, fg, border);
+        out = rewrite_waybar_window_block(&out, bg, fg, border, inactive0, inactive1);
         out = rewrite_waybar_active_workspace(&out, fg, surface);
         out = rewrite_waybar_global_colors(&out, fg, surface);
         if out != original {
@@ -2022,7 +2210,8 @@ fn rewrite_waybar_global_colors(css: &str, fg: &str, surface: &str) -> String {
 }
 
 fn restart_waybar() {
-    // Session start already spawned waybar; hard-restart freezes Hyprland on login.
+    // Prefer the user unit so style.css always reloads cleanly. SIGUSR2 alone
+    // often leaves a stale bar; bare killall+spawn can leave zombies.
     if theme_session_safe() {
         let _ = std::process::Command::new("killall")
             .args(["-SIGUSR2", "waybar"])
@@ -2032,14 +2221,36 @@ fn restart_waybar() {
             .status();
         return;
     }
+    let restarted = std::process::Command::new("systemctl")
+        .args(["--user", "restart", "waybar.service"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if restarted {
+        return;
+    }
     let _ = std::process::Command::new("killall")
         .arg("waybar")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
-    // Brief pause so the old process releases the bar layer.
-    std::thread::sleep(std::time::Duration::from_millis(150));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Prefer Hyprland exec so the bar stays in the compositor session.
+    let via_hypr = std::process::Command::new("hyprctl")
+        .args(["dispatch", "exec", "waybar"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if via_hypr {
+        return;
+    }
     let _ = std::process::Command::new("waybar")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -2047,7 +2258,14 @@ fn restart_waybar() {
         .spawn();
 }
 
-fn rewrite_waybar_window_block(css: &str, bg: &str, fg: &str, border: &str) -> String {
+fn rewrite_waybar_window_block(
+    css: &str,
+    bg: &str,
+    fg: &str,
+    _border: &str,
+    inactive0: &str,
+    inactive1: &str,
+) -> String {
     const START: &str = "window#waybar";
     let Some(start) = css.find(START) else {
         return css.to_string();
@@ -2060,8 +2278,9 @@ fn rewrite_waybar_window_block(css: &str, bg: &str, fg: &str, border: &str) -> S
         return css.to_string();
     };
     let end = start + brace + end_rel + 1;
+    // Match inactive window chrome: lighter stop in the center, darker at edges.
     let block = format!(
-        "window#waybar {{\n  background-color: {bg};\n  color: {fg};\n  border-bottom: 2px solid {border};\n}}"
+        "window#waybar {{\n  background-color: {bg};\n  color: {fg};\n  border-bottom: none;\n  padding-bottom: 10px;\n  background-image: linear-gradient(\n    90deg,\n    {inactive1} 0%,\n    {inactive0} 50%,\n    {inactive1} 100%\n  );\n  background-size: 100% 10px;\n  background-position: left bottom;\n  background-repeat: no-repeat;\n}}"
     );
     format!("{}{}{}", &css[..start], block, &css[end..])
 }
@@ -2129,6 +2348,39 @@ fn replace_ini_assign(text: &str, key: &str, value: &str) -> String {
     out
 }
 
+/// Replace `key=value` only inside `[section]` (avoids clobbering e.g. main width).
+fn replace_ini_section_assign(text: &str, section: &str, key: &str, value: &str) -> String {
+    let header = format!("[{section}]");
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut in_section = false;
+    let prefix = format!("{key}=");
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_section = trimmed == header;
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        let trimmed_start = line.trim_start();
+        if in_section && trimmed_start.starts_with(&prefix) {
+            let indent_len = line.len() - trimmed_start.len();
+            out.push_str(&line[..indent_len]);
+            out.push_str(key);
+            out.push('=');
+            out.push_str(value);
+            out.push('\n');
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !text.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 fn sync_fuzzel_colors(bg: &str, fg: &str, border: &str, surface: &str, accent: &str) {
     let bare = |h: &str| -> String {
         let t = h.trim_start_matches('#');
@@ -2151,35 +2403,40 @@ fn sync_fuzzel_colors(bg: &str, fg: &str, border: &str, surface: &str, accent: &
         out = replace_ini_assign(&out, "selection-text", &bare(fg));
         out = replace_ini_assign(&out, "match", &bare(accent));
         out = replace_ini_assign(&out, "selection-match", &bare(accent));
+        // Match Hyprland window border_size / rounding.
+        out = replace_ini_section_assign(&out, "border", "width", "10");
+        out = replace_ini_section_assign(&out, "border", "radius", "8");
         if out != original {
             let _ = std::fs::write(&path, out);
         }
     }
 }
 
-fn sync_hypr_window_borders(border_hex: &str, surface_hex: &str) {
-    let Some(active) = hex_to_hypr_rgba(border_hex, "aa") else {
-        return;
-    };
-    let Some(inactive) = hex_to_hypr_rgba(surface_hex, "88") else {
-        return;
-    };
-    if let Some(path) = hyprland_conf_path() {
+fn sync_hypr_window_borders(active: &str, inactive: &str, panel_hex: &str) {
+    let panel = hex_to_hypr_rgba(panel_hex, "ff");
+    for path in hypr_conf_paths() {
         if let Ok(original) = std::fs::read_to_string(&path) {
             let mut out = original.clone();
-            out = replace_hypr_assign(&out, "col.active_border", &active);
-            out = replace_hypr_assign(&out, "col.inactive_border", &inactive);
-            out = replace_hypr_assign(&out, "panelBorderColor", &active);
-            out = replace_hypr_assign(&out, "workspaceInactiveBorder", &format!("rgba({}ff)", &hex_digits(border_hex).unwrap_or_default()));
+            out = replace_hypr_assign(&out, "col.active_border", active);
+            out = replace_hypr_assign(&out, "col.inactive_border", inactive);
+            if let Some(panel) = &panel {
+                out = replace_hypr_assign(&out, "panelBorderColor", panel);
+                out = replace_hypr_assign(&out, "workspaceInactiveBorder", panel);
+            }
             if out != original {
                 let _ = std::fs::write(&path, out);
             }
         }
     }
-    if !theme_session_safe() {
-        hyprctl_keyword("general:col.active_border", &active);
-        hyprctl_keyword("general:col.inactive_border", &inactive);
+    apply_hypr_window_border_keywords(active, inactive);
+}
+
+fn apply_hypr_window_border_keywords(active: &str, inactive: &str) {
+    if theme_session_safe() {
+        return;
     }
+    hyprctl_keyword("general:col.active_border", active);
+    hyprctl_keyword("general:col.inactive_border", inactive);
 }
 
 fn hex_digits(hex: &str) -> Option<String> {
@@ -2194,6 +2451,13 @@ fn hex_digits(hex: &str) -> Option<String> {
 fn hex_to_hypr_rgba(hex: &str, alpha: &str) -> Option<String> {
     let digits = hex_digits(hex)?;
     Some(format!("rgba({digits}{alpha})"))
+}
+
+/// Hyprland two-stop outline: `rgba(..) rgba(..) 45deg`.
+fn hypr_gradient(a: &str, b: &str) -> Option<String> {
+    let aa = hex_to_hypr_rgba(a, "ff")?;
+    let bb = hex_to_hypr_rgba(b, "ff")?;
+    Some(format!("{aa} {bb} 45deg"))
 }
 
 const GTK_USER_CSS_BEGIN: &str = "/* BEGIN gtk-theme:shell-chrome */";
