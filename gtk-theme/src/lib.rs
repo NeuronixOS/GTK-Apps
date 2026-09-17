@@ -17,15 +17,17 @@ pub use icons::{
 };
 pub use neuron_daemon::ensure_neuron_daemon;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gtk4 as gtk;
 use gtk::gdk;
 use gtk::gio;
 use gtk::gio::prelude::*;
+use gtk::glib;
 use gtk::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -1354,6 +1356,21 @@ pathbar button:hover,
   background-color: {hover};
   color: {fg};
 }}
+/* Breadcrumbs live in a ScrolledWindow; suite themes paint scrolledwindow
+ * with the dark window bg, which made the location bar look inset/black. */
+headerbar .pathbar,
+headerbar .pathbar > *,
+.pathbar,
+.pathbar scrolledwindow,
+.pathbar scrolledwindow > viewport,
+.pathbar viewport,
+.pathbar > stack,
+.pathbar .linked {{
+  background-color: transparent;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+}}
 
 /* ---- panes / separators / status ----
  * Adwaita-dark paned separators use background-image: image(#1b1b1b) and
@@ -1454,8 +1471,8 @@ pub fn present_file_chooser_at(
     );
     style_dialog(&dialog);
     dialog.set_modal(true);
-    dialog.set_default_width(720);
-    dialog.set_default_height(480);
+    dialog.set_default_width(960);
+    dialog.set_default_height(700);
 
     if let Some(filter) = filter {
         dialog.add_filter(filter);
@@ -1468,17 +1485,46 @@ pub fn present_file_chooser_at(
         let _ = dialog.set_current_folder(Some(folder));
     }
 
-    // Make Accept the default action button.
+    // Suggested look, but do not make Extract/Open the default widget yet —
+    // a leftover context-menu click would instantly Accept the current folder.
     if let Some(btn) = dialog.widget_for_response(gtk::ResponseType::Accept) {
         btn.add_css_class("suggested-action");
-        dialog.set_default_widget(Some(&btn));
     }
+
+    let mapped_at = Rc::new(Cell::new(None::<Instant>));
+    dialog.connect_map({
+        let mapped_at = Rc::clone(&mapped_at);
+        let dialog = dialog.clone();
+        move |_| {
+            mapped_at.set(Some(Instant::now()));
+            let dialog = dialog.clone();
+            glib::timeout_add_local_once(Duration::from_millis(300), move || {
+                if let Some(btn) = dialog.widget_for_response(gtk::ResponseType::Accept) {
+                    dialog.set_default_widget(Some(&btn));
+                }
+            });
+        }
+    });
 
     let callback = RefCell::new(Some(callback));
     dialog.connect_response(move |dlg, response| {
         // Nested Cancel/DeleteEvent from close() must not consume the callback.
         if matches!(response, gtk::ResponseType::DeleteEvent) {
             return;
+        }
+        let accept = matches!(
+            response,
+            gtk::ResponseType::Accept | gtk::ResponseType::Ok
+        );
+        // Swallow the click that opened this dialog from a popover menu.
+        if accept {
+            let too_soon = mapped_at
+                .get()
+                .map(|t| t.elapsed() < Duration::from_millis(300))
+                .unwrap_or(true);
+            if too_soon {
+                return;
+            }
         }
         // Take before close() — close() can re-enter with Cancel and would
         // otherwise call the callback with None, dropping the chosen file.
@@ -1800,7 +1846,8 @@ pub fn profile_id_at(ids: &[&'static str], selected: u32) -> Option<&'static str
 
 /// Best-effort: rewrite hyprbars colors in `~/.config/hypr/hyprland.conf` to
 /// match this profile (bar = elevated surface, text/glyphs = foreground), then
-/// push live via `hyprctl keyword` + `hyprctl reload`. No-op outside Hyprland.
+/// push live via `hyprctl keyword`. No-op outside Hyprland.
+/// Does not `hyprctl reload` — that re-runs monitor= and rearranges displays.
 pub fn sync_hyprbars(profile: &Profile) {
     let _ = sync_hyprbars_colors(&profile.surface_hex(), profile.foreground);
 }
@@ -1836,10 +1883,8 @@ pub fn sync_hyprbars_colors(bar_hex: &str, text_hex: &str) -> bool {
         hyprctl_keyword("plugin:hyprbars:bar_color", &bar_rgba);
         hyprctl_keyword("plugin:hyprbars:col.text", &text_rgb);
         hyprctl_keyword("plugin:hyprbars:inactive_button_color", &bar_rgb);
-
-        // 3) Buttons are registered via the hyprbars-button keyword list; a config
-        //    reload rebuilds them from the file we just wrote.
-        hyprctl_reload();
+        // Do not hyprctl reload: that re-runs monitor= (including preferred,auto)
+        // and rearranges displays. − □ × colours persist in conf for next login.
     }
     true
 }
@@ -1988,6 +2033,7 @@ fn hyprctl_keyword(key: &str, value: &str) {
     let _ = hyprctl_quiet(hyprctl_cmd().args(["keyword", key, value])).status();
 }
 
+#[allow(dead_code)] // kept for session-start safety comments; theme apply must not reload
 fn hyprctl_reload() {
     // Session start sets this so we never `hyprctl reload` while plugins/portals
     // are still coming up (that freezes Hyprland on logout→login).
@@ -2032,7 +2078,8 @@ pub fn prepare_headerbar(header: &gtk::HeaderBar) {
 
 /// Best-effort: restyle Waybar / mako / fuzzel / Hyprland window borders to the
 /// active profile (bg / fg / surface_alt border), then reload those clients.
-/// Also writes user GTK3/GTK4 CSS so zenity (Choose background) matches.
+/// Also writes user GTK3/GTK4 CSS so zenity (Choose background) matches,
+/// and regenerates `~/.themes/neuronix` (GTK4 pavucontrol and other system apps).
 ///
 /// Always rewrites known config paths (both `~/.config` and `~/configs`) and
 /// hard-restarts Waybar so a profile switch cannot leave a stale bar on screen.
@@ -2052,6 +2099,8 @@ pub fn sync_shell_chrome(profile: &Profile) {
     {
         sync_hypr_window_borders(&active, &inactive, &profile.border_hex());
     }
+    sync_hypr_workspace_background(bg);
+    sync_gtk_term_colors(profile);
     sync_gtk_user_css(profile);
     // File pickers / Power Manager cache GTK CSS — restart on profile change.
     // During session start skip: portal + waybar bring-up already races Hyprland.
@@ -2138,10 +2187,45 @@ fn existing_config_paths(rel: &str) -> Vec<PathBuf> {
     paths
 }
 
+fn css_rgba(hex: &str, alpha: f32) -> String {
+    let (r, g, b) = parse_rgb(hex).unwrap_or((0, 0, 0));
+    format!("rgba({r}, {g}, {b}, {alpha:.2})")
+}
+
+fn waybar_vars_block(fg: &str, bg: &str, surface: &str, inactive0: &str, inactive1: &str) -> String {
+    let dim = mix_hex(fg, surface, 0.35);
+    let muted = mix_hex(fg, surface, 0.15);
+    let hover = css_rgba(surface, 0.45);
+    format!(
+        r#"{WAYBAR_VARS_BEGIN}
+@define-color wb_fg {fg};
+@define-color wb_bg {bg};
+@define-color wb_surface {surface};
+@define-color wb_dim {dim};
+@define-color wb_muted {muted};
+@define-color wb_inactive0 {inactive0};
+@define-color wb_inactive1 {inactive1};
+@define-color wb_hover {hover};
+{WAYBAR_VARS_END}
+"#
+    )
+}
+
+fn waybar_gtk_color_refs(css: &str) -> String {
+    css.replace("var(--wb-fg)", "@wb_fg")
+        .replace("var(--wb-bg)", "@wb_bg")
+        .replace("var(--wb-surface)", "@wb_surface")
+        .replace("var(--wb-dim)", "@wb_dim")
+        .replace("var(--wb-muted)", "@wb_muted")
+        .replace("var(--wb-inactive0)", "@wb_inactive0")
+        .replace("var(--wb-inactive1)", "@wb_inactive1")
+        .replace("var(--wb-hover)", "@wb_hover")
+}
+
 fn sync_waybar_style(
     bg: &str,
     fg: &str,
-    border: &str,
+    _border: &str,
     surface: &str,
     inactive0: &str,
     inactive1: &str,
@@ -2150,14 +2234,19 @@ fn sync_waybar_style(
     if paths.is_empty() {
         return;
     }
+    let block = waybar_vars_block(fg, bg, surface, inactive0, inactive1);
     for path in &paths {
         let Ok(original) = std::fs::read_to_string(path) else {
             continue;
         };
-        let mut out = original.clone();
-        out = rewrite_waybar_window_block(&out, bg, fg, border, inactive0, inactive1);
-        out = rewrite_waybar_active_workspace(&out, fg, surface);
-        out = rewrite_waybar_global_colors(&out, fg, surface);
+        let mut out = upsert_css_markers(&original, &block, WAYBAR_VARS_BEGIN, WAYBAR_VARS_END);
+        out = waybar_gtk_color_refs(&out);
+        if !original.contains("@define-color wb_fg") || original.contains("var(--wb-") {
+            out = rewrite_waybar_window_block_vars(&out);
+            out = rewrite_waybar_active_workspace_vars(&out);
+            out = promote_waybar_hardcoded_to_vars(&out);
+            out = waybar_gtk_color_refs(&out);
+        }
         if out != original {
             let _ = std::fs::write(path, &out);
         }
@@ -2165,6 +2254,7 @@ fn sync_waybar_style(
     restart_waybar();
 }
 
+#[allow(dead_code)]
 fn rewrite_waybar_global_colors(css: &str, fg: &str, surface: &str) -> String {
     // Keep module text readable when switching light ↔ dark. Rewrite common
     // hard-coded greys from the stock Neuronix stylesheet.
@@ -2210,9 +2300,18 @@ fn rewrite_waybar_global_colors(css: &str, fg: &str, surface: &str) -> String {
 }
 
 fn restart_waybar() {
-    // Prefer the user unit so style.css always reloads cleanly. SIGUSR2 alone
-    // often leaves a stale bar; bare killall+spawn can leave zombies.
-    if theme_session_safe() {
+    // Hyprland starts waybar as a session child. The distro user unit requires
+    // graphical-session.target (inactive here), so systemctl restart fails and
+    // a follow-up killall leaves the bar dead.
+    let alive = std::process::Command::new("pgrep")
+        .args(["-x", "waybar"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if alive {
         let _ = std::process::Command::new("killall")
             .args(["-SIGUSR2", "waybar"])
             .stdin(std::process::Stdio::null())
@@ -2221,25 +2320,6 @@ fn restart_waybar() {
             .status();
         return;
     }
-    let restarted = std::process::Command::new("systemctl")
-        .args(["--user", "restart", "waybar.service"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if restarted {
-        return;
-    }
-    let _ = std::process::Command::new("killall")
-        .arg("waybar")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    // Prefer Hyprland exec so the bar stays in the compositor session.
     let via_hypr = std::process::Command::new("hyprctl")
         .args(["dispatch", "exec", "waybar"])
         .stdin(std::process::Stdio::null())
@@ -2258,16 +2338,8 @@ fn restart_waybar() {
         .spawn();
 }
 
-fn rewrite_waybar_window_block(
-    css: &str,
-    bg: &str,
-    fg: &str,
-    _border: &str,
-    inactive0: &str,
-    inactive1: &str,
-) -> String {
-    const START: &str = "window#waybar";
-    let Some(start) = css.find(START) else {
+fn rewrite_css_selector_block(css: &str, selector: &str, body: &str) -> String {
+    let Some(start) = css.find(selector) else {
         return css.to_string();
     };
     let after = &css[start..];
@@ -2278,33 +2350,64 @@ fn rewrite_waybar_window_block(
         return css.to_string();
     };
     let end = start + brace + end_rel + 1;
-    // Match inactive window chrome: lighter stop in the center, darker at edges.
-    let block = format!(
-        "window#waybar {{\n  background-color: {bg};\n  color: {fg};\n  border-bottom: none;\n  padding-bottom: 10px;\n  background-image: linear-gradient(\n    90deg,\n    {inactive1} 0%,\n    {inactive0} 50%,\n    {inactive1} 100%\n  );\n  background-size: 100% 10px;\n  background-position: left bottom;\n  background-repeat: no-repeat;\n}}"
-    );
+    let block = format!("{selector} {{\n{body}\n}}");
     format!("{}{}{}", &css[..start], block, &css[end..])
 }
 
-fn rewrite_waybar_active_workspace(css: &str, fg: &str, surface: &str) -> String {
-    const START: &str = "#workspaces button.active";
-    let Some(start) = css.find(START) else {
-        return css.to_string();
-    };
-    let after = &css[start..];
-    let Some(brace) = after.find('{') else {
-        return css.to_string();
-    };
-    let Some(end_rel) = after[brace..].find('}') else {
-        return css.to_string();
-    };
-    let end = start + brace + end_rel + 1;
-    let block = format!(
-        "#workspaces button.active {{\n  color: {fg};\n  background: {surface};\n}}"
-    );
-    format!("{}{}{}", &css[..start], block, &css[end..])
+fn rewrite_waybar_window_block_vars(css: &str) -> String {
+    rewrite_css_selector_block(
+        css,
+        "window#waybar",
+        "  background-color: @wb_bg;\n  color: @wb_fg;\n  border-bottom: none;\n  padding-bottom: 10px;\n  background-image: linear-gradient(\n    90deg,\n    @wb_inactive1 0%,\n    @wb_inactive0 50%,\n    @wb_inactive1 100%\n  );\n  background-size: 100% 10px;\n  background-position: left bottom;\n  background-repeat: no-repeat;",
+    )
+}
+
+fn rewrite_waybar_active_workspace_vars(css: &str) -> String {
+    rewrite_css_selector_block(
+        css,
+        "#workspaces button.active",
+        "  color: @wb_fg;\n  background: @wb_surface;",
+    )
+}
+
+fn promote_waybar_hardcoded_to_vars(css: &str) -> String {
+    let mut out = String::with_capacity(css.len() + 32);
+    for line in css.lines() {
+        let trimmed = line.trim();
+        let replaced = if trimmed == "color: #f5f5f5;" || trimmed == "color: #ffffff;" {
+            let indent_len = line.len() - line.trim_start().len();
+            format!("{}color: @wb_fg;", &line[..indent_len])
+        } else if trimmed == "color: #cccccc;" {
+            let indent_len = line.len() - line.trim_start().len();
+            format!("{}color: @wb_muted;", &line[..indent_len])
+        } else if trimmed == "color: #888888;" {
+            let indent_len = line.len() - line.trim_start().len();
+            format!("{}color: @wb_dim;", &line[..indent_len])
+        } else if trimmed.starts_with("background: #2e2e2e")
+            || trimmed.starts_with("background-color: #2e2e2e")
+            || trimmed.starts_with("background: #0a0a0a")
+        {
+            let indent_len = line.len() - line.trim_start().len();
+            let prop = if trimmed.starts_with("background-color") {
+                "background-color"
+            } else {
+                "background"
+            };
+            format!("{}{prop}: @wb_surface;", &line[..indent_len])
+        } else {
+            line.to_string()
+        };
+        out.push_str(&replaced);
+        out.push('\n');
+    }
+    if !css.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
 }
 
 fn sync_mako_colors(bg: &str, fg: &str, border: &str) {
+    let progress = mix_hex(fg, bg, 0.55);
     for path in existing_config_paths("mako/config") {
         let Ok(original) = std::fs::read_to_string(&path) else {
             continue;
@@ -2313,6 +2416,7 @@ fn sync_mako_colors(bg: &str, fg: &str, border: &str) {
         out = replace_ini_assign(&out, "background-color", bg);
         out = replace_ini_assign(&out, "text-color", fg);
         out = replace_ini_assign(&out, "border-color", border);
+        out = replace_ini_assign(&out, "progress-color", &progress);
         if out != original {
             let _ = std::fs::write(&path, out);
         }
@@ -2431,6 +2535,84 @@ fn sync_hypr_window_borders(active: &str, inactive: &str, panel_hex: &str) {
     apply_hypr_window_border_keywords(active, inactive);
 }
 
+fn sync_hypr_workspace_background(bg: &str) {
+    let Some(rgb) = hex_to_hypr_rgb(bg) else {
+        return;
+    };
+    let mut wrote = false;
+    for path in hypr_conf_paths() {
+        if path.file_name().is_none_or(|n| n != "hyprland.conf") {
+            continue;
+        }
+        let Ok(original) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let out = replace_hypr_assign(&original, "background_color", &rgb);
+        if out != original {
+            if std::fs::write(&path, out).is_ok() {
+                wrote = true;
+            }
+        }
+    }
+    if wrote && !theme_session_safe() {
+        hyprctl_keyword("misc:background_color", &rgb);
+    }
+}
+
+fn gtk_term_colors_toml(profile: &Profile) -> String {
+    let pal = profile
+        .palette
+        .iter()
+        .map(|c| format!("    \"{c}\","))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "[colors]\nforeground = \"{}\"\nbackground = \"{}\"\npalette = [\n{pal}\n]\n",
+        profile.foreground, profile.background
+    )
+}
+
+fn replace_toml_table(text: &str, header: &str, body: &str) -> String {
+    if let Some(start) = text.find(header) {
+        let after = &text[start + header.len()..];
+        let rel_end = after.find("\n[").map(|i| i + 1).unwrap_or(after.len());
+        let mut out = String::new();
+        out.push_str(&text[..start]);
+        out.push_str(body.trim_end());
+        let rest = &after[rel_end..];
+        if !rest.is_empty() {
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(rest);
+        } else if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out
+    } else {
+        let mut out = text.trim_end().to_string();
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(body.trim_end());
+        out.push('\n');
+        out
+    }
+}
+
+fn sync_gtk_term_colors(profile: &Profile) {
+    let body = gtk_term_colors_toml(profile);
+    for path in existing_config_paths("gtk-apps/gtk-term/config.toml") {
+        let Ok(original) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let out = replace_toml_table(&original, "[colors]", &body);
+        if out != original {
+            let _ = std::fs::write(&path, out);
+        }
+    }
+}
+
 fn apply_hypr_window_border_keywords(active: &str, inactive: &str) {
     if theme_session_safe() {
         return;
@@ -2462,6 +2644,19 @@ fn hypr_gradient(a: &str, b: &str) -> Option<String> {
 
 const GTK_USER_CSS_BEGIN: &str = "/* BEGIN gtk-theme:shell-chrome */";
 const GTK_USER_CSS_END: &str = "/* END gtk-theme:shell-chrome */";
+const WAYBAR_VARS_BEGIN: &str = "/* BEGIN gtk-theme:waybar-vars */";
+const WAYBAR_VARS_END: &str = "/* END gtk-theme:waybar-vars */";
+/// Full GTK3/GTK4 theme under ~/.themes (THEME priority). Rewritten on profile change.
+const SHELL_GTK_THEME: &str = "neuronix";
+
+fn papirus_icon_theme(is_dark: bool) -> &'static str {
+    // Papirus action glyphs are dark (#444); Papirus-Dark is light-on-dark.
+    if is_dark {
+        "Papirus-Dark"
+    } else {
+        "Papirus"
+    }
+}
 
 /// CSS injected into `~/.config/gtk-{3,4}.0/gtk.css` so system dialogs
 /// (zenity, XFCE Power Manager, FileChooser, etc.) follow the suite profile.
@@ -2478,6 +2673,7 @@ fn system_dialog_css(profile: &Profile) -> String {
     };
     let hover = mix_hex(bg, fg, 0.12);
     let dim = mix_hex(fg, bg, 0.35);
+    let overrides = adwaita_accent_overrides(profile);
     format!(
         r#"{GTK_USER_CSS_BEGIN}
 /* Suite profile → zenity / FileChooser / XFCE Power Manager / GTK3 settings */
@@ -2671,17 +2867,82 @@ toolbar, .primary-toolbar, .inline-toolbar {{
   color: {fg};
   border-color: {border};
 }}
+{overrides}
 {GTK_USER_CSS_END}
 "#
     )
 }
 
+fn adwaita_accent_overrides(profile: &Profile) -> String {
+    let accent = profile.accent();
+    let on_accent = if relative_luminance(accent) < 0.55 {
+        "#fbf1c7"
+    } else {
+        "#1d2021"
+    };
+    let (r, g, b) = parse_rgb(accent).unwrap_or((0, 0, 0));
+    let outline = format!("rgba({r}, {g}, {b}, 0.7)");
+    format!(
+        r#"
+/* Adwaita hard-codes blues (#1b6acb / #15539e). Match those selectors. */
+switch:checked, switch:checked:hover, switch:checked:active,
+switch:backdrop:checked, switch:checked:not(:disabled) {{
+  background-color: {accent};
+  background-image: none;
+  border-color: {accent};
+  color: {on_accent};
+}}
+switch:checked > slider, switch:backdrop:checked > slider {{
+  border-color: {accent};
+}}
+notebook > header.top > tabs > tab:checked {{
+  box-shadow: inset 0 -4px {accent};
+}}
+notebook > header.bottom > tabs > tab:checked {{
+  box-shadow: inset 0 4px {accent};
+}}
+notebook > header.left > tabs > tab:checked {{
+  box-shadow: inset -4px 0 {accent};
+}}
+notebook > header.right > tabs > tab:checked {{
+  box-shadow: inset 4px 0 {accent};
+}}
+progressbar progress, scale highlight,
+progressbar progress:backdrop, scale highlight:backdrop {{
+  background-color: {accent};
+  background-image: none;
+  border-color: {accent};
+}}
+button.suggested-action, button.suggested-action:hover,
+button.suggested-action:active, button.suggested-action:backdrop {{
+  background-color: {accent};
+  background-image: none;
+  color: {on_accent};
+  border-color: {accent};
+}}
+*:link, *:visited, .link, button.link {{
+  color: {accent};
+}}
+*:selected:focus, *:selected:focus-within,
+label > selection:focus-within, entry > text > selection:focus-within {{
+  background-color: {accent};
+  color: {on_accent};
+}}
+switch:focus, switch:focus:checked, scale:focus,
+button:focus, check:focus, radio:focus {{
+  outline-color: {outline};
+}}
+"#
+    )
+}
+
 fn upsert_managed_css_block(existing: &str, block: &str) -> String {
-    if let (Some(start), Some(end_rel)) = (
-        existing.find(GTK_USER_CSS_BEGIN),
-        existing.find(GTK_USER_CSS_END),
-    ) {
-        let end = end_rel + GTK_USER_CSS_END.len();
+    upsert_css_markers(existing, block, GTK_USER_CSS_BEGIN, GTK_USER_CSS_END)
+}
+
+fn upsert_css_markers(existing: &str, block: &str, begin: &str, end: &str) -> String {
+    if let (Some(start), Some(end_rel)) = (existing.find(begin), existing.find(end)) {
+        let end = end_rel + end.len();
         let mut out = String::new();
         out.push_str(&existing[..start]);
         out.push_str(block.trim_end());
@@ -2705,12 +2966,373 @@ fn upsert_managed_css_block(existing: &str, block: &str) -> String {
     out
 }
 
+fn strip_managed_css_markers(block: &str) -> String {
+    format!(
+        "{}\n",
+        block
+            .replace(GTK_USER_CSS_BEGIN, "")
+            .replace(GTK_USER_CSS_END, "")
+            .trim()
+    )
+}
+
+fn upsert_ini_key(text: &str, key: &str, value: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut found = false;
+    if !text.contains("[Settings]") {
+        lines.push("[Settings]".into());
+    }
+    for line in text.lines() {
+        let stripped = line.trim_start();
+        if stripped.starts_with(&format!("{key}=")) || stripped.starts_with(&format!("{key} ")) {
+            lines.push(format!("{key}={value}"));
+            found = true;
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if !found {
+        if !lines.iter().any(|l| l.contains("[Settings]")) {
+            lines.insert(0, "[Settings]".into());
+        }
+        lines.push(format!("{key}={value}"));
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+fn upsert_xsettings_key(text: &str, key: &str, value: &str) -> String {
+    let line_out = format!("{key} \"{value}\"");
+    let mut lines: Vec<String> = Vec::new();
+    let mut found = false;
+    for line in text.lines() {
+        let stripped = line.trim_start();
+        if stripped.starts_with(&format!("{key} ")) || stripped.starts_with(&format!("{key}\t")) {
+            lines.push(line_out.clone());
+            found = true;
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if !found {
+        lines.push(line_out);
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+fn upsert_gtkrc_key(text: &str, key: &str, value: &str) -> String {
+    let line_out = format!("{key}=\"{value}\"");
+    let mut lines: Vec<String> = Vec::new();
+    let mut found = false;
+    for line in text.lines() {
+        let stripped = line.trim_start();
+        if stripped.starts_with(&format!("{key}=")) || stripped.starts_with(&format!("{key} ")) {
+            lines.push(line_out.clone());
+            found = true;
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if !found {
+        lines.push(line_out);
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+fn xfconf_set_string(prop: &str, value: &str) {
+    let exists = std::process::Command::new("xfconf-query")
+        .args(["-c", "xsettings", "-p", prop])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let mut cmd = std::process::Command::new("xfconf-query");
+    if exists {
+        cmd.args(["-c", "xsettings", "-p", prop, "-s", value]);
+    } else {
+        cmd.args([
+            "-c",
+            "xsettings",
+            "-n",
+            "-t",
+            "string",
+            "-p",
+            prop,
+            "-s",
+            value,
+        ]);
+    }
+    let _ = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+fn sync_session_icon_theme(is_dark: bool) {
+    let icons = papirus_icon_theme(is_dark);
+    for path in existing_config_paths("xsettingsd/xsettingsd.conf") {
+        if let Ok(original) = std::fs::read_to_string(&path) {
+            let out = upsert_xsettings_key(&original, "Net/IconThemeName", icons);
+            if out != original {
+                let _ = std::fs::write(&path, out);
+            }
+        }
+    }
+    let _ = std::process::Command::new("pkill")
+        .args(["-HUP", "-x", "xsettingsd"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let mut gtkrc_paths = existing_config_paths("gtkrc-2.0");
+    if let Some(home) = dirs::home_dir() {
+        gtkrc_paths.push(home.join(".gtkrc-2.0"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for path in gtkrc_paths {
+        if !path.is_file() {
+            continue;
+        }
+        let key = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if !seen.insert(key) {
+            continue;
+        }
+        if let Ok(original) = std::fs::read_to_string(&path) {
+            let out = upsert_gtkrc_key(&original, "gtk-icon-theme-name", icons);
+            if out != original {
+                let _ = std::fs::write(&path, out);
+            }
+        }
+    }
+    for path in existing_config_paths("fuzzel/fuzzel.ini") {
+        if let Ok(original) = std::fs::read_to_string(&path) {
+            let out = replace_ini_assign(&original, "icon-theme", icons);
+            if out != original {
+                let _ = std::fs::write(&path, out);
+            }
+        }
+    }
+}
+
+fn shell_theme_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join(".themes").join(SHELL_GTK_THEME));
+    }
+    if let Some(data) = dirs::data_dir() {
+        roots.push(data.join("themes").join(SHELL_GTK_THEME));
+    }
+    roots
+}
+
+fn shell_theme_index(profile: &Profile) -> String {
+    let variant = if profile.is_dark() { "dark" } else { "light" };
+    format!(
+        "[Desktop Entry]\n\
+Type=X-GNOME-Metatheme\n\
+Name=Neuronix\n\
+Comment=Generated by gtk-theme from profile {} ({variant})\n\
+Encoding=UTF-8\n\
+\n\
+[X-GNOME-Metatheme]\n\
+GtkTheme={SHELL_GTK_THEME}\n\
+MetacityTheme=Adwaita\n\
+IconTheme={}\n\
+CursorTheme=Adwaita\n\
+ButtonLayout=:minimize,maximize,close\n",
+        profile.id,
+        papirus_icon_theme(profile.is_dark())
+    )
+}
+
+fn shell_theme_gtk3_css(profile: &Profile) -> String {
+    let imported = if profile.is_dark() {
+        r#"@import url("resource:///org/gtk/libgtk/theme/Adwaita/gtk-contained-dark.css");"#
+    } else {
+        r#"@import url("resource:///org/gtk/libgtk/theme/Adwaita/gtk-contained.css");"#
+    };
+    format!(
+        "/* Generated by gtk-theme ({}) — rewritten on profile change. */\n{imported}\n\n{}",
+        profile.id,
+        strip_managed_css_markers(&system_dialog_css(profile))
+    )
+}
+
+fn shell_theme_gtk4_extra(profile: &Profile) -> String {
+    let bg = profile.background;
+    let fg = profile.foreground;
+    let surface = profile.surface_hex();
+    let border = profile.surface_alt_hex();
+    let accent = profile.accent();
+    let on_accent = if relative_luminance(accent) < 0.55 {
+        "#fbf1c7"
+    } else {
+        "#1d2021"
+    };
+    let hover = mix_hex(bg, fg, 0.12);
+    let (r, g, b) = parse_rgb(accent).unwrap_or((0, 0, 0));
+    let outline = format!("rgba({r}, {g}, {b}, 0.7)");
+    format!(
+        r#"
+/* GTK4 combinators (Adwaita Default hard-codes #15539e on scales). */
+.background {{
+  color: {fg};
+  background-color: {bg};
+}}
+.view, iconview, textview > text {{
+  color: {fg};
+  background-color: {bg};
+}}
+headerbar, headerbar.windowhandle {{
+  background-color: {surface};
+  color: {fg};
+  border-bottom-color: {border};
+}}
+progressbar > trough > progress, scale > trough > highlight {{
+  border: 1px solid {accent};
+  background-color: {accent};
+  background-image: none;
+}}
+scale > trough {{
+  background-color: {border};
+  border-color: {border};
+}}
+scale > trough > slider {{
+  background-image: none;
+  background-color: {accent};
+  border-color: {accent};
+}}
+scale > trough > slider:hover {{
+  background-image: none;
+  background-color: {hover};
+}}
+scale:focus:focus-visible > trough {{
+  outline-color: {outline};
+}}
+switch:checked {{
+  background-color: {accent};
+  border-color: {accent};
+}}
+check:checked, radio:checked,
+checkbutton > check:checked, radiobutton > radio:checked {{
+  background-color: {accent};
+  border-color: {accent};
+  color: {on_accent};
+}}
+.view:selected, listview > row:selected, gridview > child:selected {{
+  background-color: {accent};
+  color: {on_accent};
+}}
+"#
+    )
+}
+
+fn shell_theme_gtk4_css(profile: &Profile) -> String {
+    let imported = if profile.is_dark() {
+        r#"@import url("resource:///org/gtk/libgtk/theme/Default-dark/gtk.css");"#
+    } else {
+        r#"@import url("resource:///org/gtk/libgtk/theme/Default/gtk.css");"#
+    };
+    format!(
+        "/* Generated by gtk-theme ({}) — rewritten on profile change. */\n{imported}\n\n{}{}\n{}",
+        profile.id,
+        strip_managed_css_markers(&system_dialog_css_gtk4(profile)),
+        strip_managed_css_markers(&system_dialog_css(profile)),
+        shell_theme_gtk4_extra(profile)
+    )
+}
+
+fn sync_hypr_gtk_theme_env(is_dark: bool) {
+    let icons = papirus_icon_theme(is_dark);
+    let replacements = [
+        ("GTK_THEME", SHELL_GTK_THEME),
+        ("GTK_ICON_THEME", icons),
+        ("XDG_ICON_THEME", icons),
+    ];
+    for path in config_candidates("hypr/hyprland.conf") {
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(original) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let mut changed = false;
+        let mut lines = Vec::new();
+        for line in original.lines() {
+            let trimmed = line.trim_start();
+            let mut replaced = false;
+            if trimmed.starts_with("env") {
+                for (key, value) in replacements {
+                    let needle = format!("{key},");
+                    if trimmed.contains(&needle) {
+                        lines.push(format!("env = {key},{value}"));
+                        changed = true;
+                        replaced = true;
+                        break;
+                    }
+                }
+            }
+            if !replaced {
+                lines.push(line.to_string());
+            }
+        }
+        if changed {
+            let mut out = lines.join("\n");
+            if original.ends_with('\n') {
+                out.push('\n');
+            }
+            let _ = std::fs::write(&path, out);
+        }
+    }
+    std::env::set_var("GTK_THEME", SHELL_GTK_THEME);
+    std::env::set_var("GTK_ICON_THEME", icons);
+    std::env::set_var("XDG_ICON_THEME", icons);
+    let _ = std::process::Command::new("dbus-update-activation-environment")
+        .args([
+            "--systemd",
+            "GTK_THEME",
+            "GTK_ICON_THEME",
+            "XDG_ICON_THEME",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+fn sync_shell_gtk_theme(profile: &Profile) {
+    let gtk3 = shell_theme_gtk3_css(profile);
+    let gtk4 = shell_theme_gtk4_css(profile);
+    let index = shell_theme_index(profile);
+    for root in shell_theme_roots() {
+        let gtk3_dir = root.join("gtk-3.0");
+        let gtk4_dir = root.join("gtk-4.0");
+        if std::fs::create_dir_all(&gtk3_dir).is_err() || std::fs::create_dir_all(&gtk4_dir).is_err()
+        {
+            continue;
+        }
+        let _ = std::fs::write(root.join("index.theme"), &index);
+        let _ = std::fs::write(gtk3_dir.join("gtk.css"), &gtk3);
+        let _ = std::fs::write(gtk4_dir.join("gtk.css"), &gtk4);
+    }
+    sync_hypr_gtk_theme_env(profile.is_dark());
+}
+
 fn sync_gtk_user_css(profile: &Profile) {
     // GTK3 (zenity): full dialog chrome — zenity has no suite apply_chrome.
     // GTK4: only @define-color + dialog selectors. Generic `headerbar` / `window`
     // rules here load at STYLE_PROVIDER_PRIORITY_USER and permanently override
     // suite chrome (USER-10) until the process restarts — that left purple
     // headerbars after switching to a light profile.
+    // Full GTK4 chrome for pavucontrol etc. lives in ~/.themes/neuronix.
     let gtk3 = system_dialog_css(profile);
     let gtk4 = system_dialog_css_gtk4(profile);
     for (ver, block) in [("gtk-3.0", gtk3.as_str()), ("gtk-4.0", gtk4.as_str())] {
@@ -2725,32 +3347,15 @@ fn sync_gtk_user_css(profile: &Profile) {
 
         let settings = dir.join("settings.ini");
         let prefer = if profile.is_dark() { "1" } else { "0" };
-        let ini = format!("[Settings]\ngtk-application-prefer-dark-theme={prefer}\n");
-        if let Ok(prev) = std::fs::read_to_string(&settings) {
-            let mut found = false;
-            let mut lines = Vec::new();
-            for line in prev.lines() {
-                if line
-                    .trim_start()
-                    .starts_with("gtk-application-prefer-dark-theme")
-                {
-                    lines.push(format!("gtk-application-prefer-dark-theme={prefer}"));
-                    found = true;
-                } else {
-                    lines.push(line.to_string());
-                }
-            }
-            if !found {
-                if !prev.contains("[Settings]") {
-                    lines.insert(0, "[Settings]".into());
-                }
-                lines.push(format!("gtk-application-prefer-dark-theme={prefer}"));
-            }
-            let _ = std::fs::write(&settings, lines.join("\n") + "\n");
-        } else {
-            let _ = std::fs::write(&settings, ini);
-        }
+        let prev = std::fs::read_to_string(&settings).unwrap_or_default();
+        let mut ini = upsert_ini_key(&prev, "gtk-application-prefer-dark-theme", prefer);
+        ini = upsert_ini_key(&ini, "gtk-theme-name", SHELL_GTK_THEME);
+        ini = upsert_ini_key(&ini, "gtk-icon-theme-name", papirus_icon_theme(profile.is_dark()));
+        ini = upsert_ini_key(&ini, "gtk-button-images", "1");
+        ini = upsert_ini_key(&ini, "gtk-menu-images", "1");
+        let _ = std::fs::write(&settings, ini);
     }
+    sync_shell_gtk_theme(profile);
     sync_gsettings_color_scheme(profile.is_dark());
 }
 
@@ -2856,7 +3461,8 @@ fn sync_gsettings_color_scheme(is_dark: bool) {
     } else {
         "prefer-light"
     };
-    let theme = if is_dark { "Adwaita-dark" } else { "Adwaita" };
+    let theme = SHELL_GTK_THEME;
+    let icons = papirus_icon_theme(is_dark);
     let _ = std::process::Command::new("gsettings")
         .args(["set", "org.gnome.desktop.interface", "color-scheme", scheme])
         .stdin(std::process::Stdio::null())
@@ -2869,40 +3475,16 @@ fn sync_gsettings_color_scheme(is_dark: bool) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
-    // XFCE Power Manager reads xsettings (often unset under Hyprland).
-    let exists = std::process::Command::new("xfconf-query")
-        .args(["-c", "xsettings", "-p", "/Net/ThemeName"])
+    let _ = std::process::Command::new("gsettings")
+        .args(["set", "org.gnome.desktop.interface", "icon-theme", icons])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if exists {
-        let _ = std::process::Command::new("xfconf-query")
-            .args(["-c", "xsettings", "-p", "/Net/ThemeName", "-s", theme])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    } else {
-        let _ = std::process::Command::new("xfconf-query")
-            .args([
-                "-c",
-                "xsettings",
-                "-n",
-                "-t",
-                "string",
-                "-p",
-                "/Net/ThemeName",
-                "-s",
-                theme,
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
+        .status();
+    // XFCE Power Manager / xfsettingsd (often unset under Hyprland).
+    xfconf_set_string("/Net/ThemeName", theme);
+    xfconf_set_string("/Net/IconThemeName", icons);
+    sync_session_icon_theme(is_dark);
 }
 
 /// Persist theme id, apply chrome CSS, then invoke `on_profile`.

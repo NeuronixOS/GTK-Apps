@@ -16,8 +16,9 @@ Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/N
 - Show/hide hidden files (`Ctrl+H`)
 - Cut / copy / paste, rename, new folder / document
 - Move to Trash / permanent delete with confirmation
-- Empty Trash, file properties dialog
 - Open with default application (`GtkFileLauncher`)
+- **Archives**: context menu → Unzip / Untar Here / Compress as ZIP or tar.gz (uses `zip`/`unzip`/`tar`; double‑click opens **xarchiver**)
+- Empty Trash, file properties dialog
 - Open With… dialog (MIME type, current default, set new default)
 - Bottom terminal / Find in Files panel that follows the focused folder
 - Drag and drop files (out to other apps, into folders / current view)

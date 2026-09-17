@@ -42,6 +42,13 @@ ABOUT_MENU_ACTION = "win.about"
 SUITE_WEBSITE = "https://github.com/NeuronixOS/GTK-Apps"
 SUITE_WEBSITE_LABEL = "github.com/NeuronixOS/GTK-Apps"
 SUITE_AUTHOR = "Created by Kevin Hinds"
+# Full GTK3/GTK4 theme under ~/.themes (THEME priority). Rewritten on profile change.
+SHELL_GTK_THEME = "neuronix"
+
+
+def _papirus_icon_theme(is_dark: bool) -> str:
+    """Papirus action glyphs are dark (#444); Papirus-Dark is light-on-dark."""
+    return "Papirus-Dark" if is_dark else "Papirus"
 
 _profiles: list["Profile"] | None = None
 _chrome_provider = None  # Gtk.CssProvider (4 or 3)
@@ -333,6 +340,36 @@ headerbar button, menubar button, button.flat, button.image-button {{
 headerbar button:hover, button.flat:hover, button.image-button:hover {{
   background-color: {hover};
   color: {fg};
+}}
+
+/* gtk-files / Nautilus-style breadcrumbs sit in a ScrolledWindow. Suite
+ * themes paint scrolledwindow with the dark window bg — keep pathbar clear
+ * so the location strip matches the header surface. */
+pathbar button,
+.pathbar button {{
+  background: transparent;
+  background-color: transparent;
+  color: {fg};
+  border: none;
+  box-shadow: none;
+}}
+pathbar button:hover,
+.pathbar button:hover {{
+  background-color: {hover};
+  color: {fg};
+}}
+headerbar .pathbar,
+headerbar .pathbar > *,
+.pathbar,
+.pathbar scrolledwindow,
+.pathbar scrolledwindow > viewport,
+.pathbar viewport,
+.pathbar > stack,
+.pathbar .linked {{
+  background-color: transparent;
+  background-image: none;
+  border: none;
+  box-shadow: none;
 }}
 
 /* Window chrome (min / max / close) — match Rust gtk-theme: muted icons,
@@ -721,8 +758,9 @@ def sync_hyprbars_colors(bar_hex: str, text_hex: str) -> bool:
         _hyprctl_keyword("plugin:hyprbars:bar_color", bar_rgba)
         _hyprctl_keyword("plugin:hyprbars:col.text", text_rgb)
         _hyprctl_keyword("plugin:hyprbars:inactive_button_color", bar_rgb)
-        # 3) Rebuild − □ × buttons from the rewritten hyprbars-button lines.
-        _hyprctl_reload()
+        # Do not `hyprctl reload` here. Reload re-runs monitor= (including
+        # `monitor=,preferred,auto`) and rearranges displays. − □ × button
+        # colours persist in the conf and apply on the next login.
     return True
 
 
@@ -882,13 +920,15 @@ def sync_shell_chrome(profile: Optional[Profile] = None) -> bool:
     accent = profile.accent()
     i0, i1 = profile.border_inactive_stops()
     _sync_waybar_style(bg, fg, border, surface, i0, i1)
-    _sync_mako_colors(bg, fg, border)
+    _sync_mako_colors(bg, fg, border, surface)
     # Fuzzel chrome matches window inactive border + Hypr rounding.
     _sync_fuzzel_colors(bg, fg, i0, surface, accent)
     active = profile.hypr_active_border()
     inactive = profile.hypr_inactive_border()
     if active and inactive:
         _sync_hypr_window_borders(active, inactive, profile.border_hex())
+    _sync_hypr_workspace_background(bg)
+    _sync_gtk_term_colors(profile)
     _sync_gtk_user_css(profile)
     # On profile change: drop cached GTK dialogs / portal. During session start
     # (NEURONIX_THEME_NO_HYPR_RELOAD) skip — portal/waybar bring-up already races.
@@ -962,6 +1002,66 @@ def _restart_system_dialogs() -> None:
 
 _GTK_USER_CSS_BEGIN = "/* BEGIN gtk-theme:shell-chrome */"
 _GTK_USER_CSS_END = "/* END gtk-theme:shell-chrome */"
+_WAYBAR_VARS_BEGIN = "/* BEGIN gtk-theme:waybar-vars */"
+_WAYBAR_VARS_END = "/* END gtk-theme:waybar-vars */"
+
+
+def _adwaita_accent_overrides(profile: Profile) -> str:
+    """Beat Adwaita selectors that hard-code #15539e / #1b6acb (switches, tabs)."""
+    accent = profile.accent()
+    on_accent = "#fbf1c7" if _relative_luminance(accent) < 0.55 else "#1d2021"
+    r, g, b = _parse_hex(accent)
+    outline = f"rgba({r}, {g}, {b}, 0.7)"
+    return f"""
+/* Adwaita hard-codes blues (#1b6acb / #15539e). Match those selectors. */
+switch:checked, switch:checked:hover, switch:checked:active,
+switch:backdrop:checked, switch:checked:not(:disabled) {{
+  background-color: {accent};
+  background-image: none;
+  border-color: {accent};
+  color: {on_accent};
+}}
+switch:checked > slider, switch:backdrop:checked > slider {{
+  border-color: {accent};
+}}
+notebook > header.top > tabs > tab:checked {{
+  box-shadow: inset 0 -4px {accent};
+}}
+notebook > header.bottom > tabs > tab:checked {{
+  box-shadow: inset 0 4px {accent};
+}}
+notebook > header.left > tabs > tab:checked {{
+  box-shadow: inset -4px 0 {accent};
+}}
+notebook > header.right > tabs > tab:checked {{
+  box-shadow: inset 4px 0 {accent};
+}}
+progressbar progress, scale highlight,
+progressbar progress:backdrop, scale highlight:backdrop {{
+  background-color: {accent};
+  background-image: none;
+  border-color: {accent};
+}}
+button.suggested-action, button.suggested-action:hover,
+button.suggested-action:active, button.suggested-action:backdrop {{
+  background-color: {accent};
+  background-image: none;
+  color: {on_accent};
+  border-color: {accent};
+}}
+*:link, *:visited, .link, button.link {{
+  color: {accent};
+}}
+*:selected:focus, *:selected:focus-within,
+label > selection:focus-within, entry > text > selection:focus-within {{
+  background-color: {accent};
+  color: {on_accent};
+}}
+switch:focus, switch:focus:checked, scale:focus,
+button:focus, check:focus, radio:focus {{
+  outline-color: {outline};
+}}
+"""
 
 
 def _system_dialog_css(profile: Profile) -> str:
@@ -1059,6 +1159,18 @@ scrolledwindow, viewport, .view, textview, textview text {{
   background-color: {bg};
   background-image: none;
   color: {fg};
+}}
+/* Location/path bars (gtk-files breadcrumbs) — do not inherit window bg. */
+.pathbar,
+.pathbar scrolledwindow,
+.pathbar scrolledwindow > viewport,
+.pathbar viewport,
+.pathbar > stack,
+.pathbar .linked {{
+  background-color: transparent;
+  background-image: none;
+  border: none;
+  box-shadow: none;
 }}
 /* XFCE Power Manager + other GTK3 settings windows */
 notebook > header {{
@@ -1166,16 +1278,21 @@ toolbar, .primary-toolbar, .inline-toolbar {{
   color: {fg};
   border-color: {border};
 }}
-{_GTK_USER_CSS_END}
+{_adwaita_accent_overrides(profile)}{_GTK_USER_CSS_END}
 """
 
 
-def _upsert_managed_css_block(existing: str, block: str) -> str:
-    start = existing.find(_GTK_USER_CSS_BEGIN)
-    end = existing.find(_GTK_USER_CSS_END)
-    if start >= 0 and end >= 0:
-        end += len(_GTK_USER_CSS_END)
-        after = existing[end:].lstrip("\r\n")
+def _upsert_managed_css_block(
+    existing: str,
+    block: str,
+    begin: str = _GTK_USER_CSS_BEGIN,
+    end: str = _GTK_USER_CSS_END,
+) -> str:
+    start = existing.find(begin)
+    end_pos = existing.find(end)
+    if start >= 0 and end_pos >= 0:
+        end_pos += len(end)
+        after = existing[end_pos:].lstrip("\r\n")
         out = existing[:start] + block.rstrip() + "\n"
         if after:
             out += "\n" + after
@@ -1193,6 +1310,8 @@ def _sync_gtk_user_css(profile: Profile) -> None:
     # GTK3 gets full dialog chrome (zenity). GTK4 only defines colors + dialog
     # selectors — generic headerbar/window rules at USER priority override suite
     # chrome and stick until process restart (purple leftovers on light themes).
+    # Full GTK4 chrome for pavucontrol etc. lives in ~/.themes/neuronix (THEME
+    # priority) via _sync_shell_gtk_theme — not here.
     gtk3 = _system_dialog_css(profile)
     gtk4 = _system_dialog_css_gtk4(profile)
     prefer = "1" if profile.is_dark() else "0"
@@ -1214,28 +1333,18 @@ def _sync_gtk_user_css(profile: Profile) -> None:
             pass
         settings = d / "settings.ini"
         try:
-            if settings.is_file():
-                prev = settings.read_text(encoding="utf-8")
-                lines = []
-                found = False
-                for line in prev.splitlines():
-                    if line.lstrip().startswith("gtk-application-prefer-dark-theme"):
-                        lines.append(f"gtk-application-prefer-dark-theme={prefer}")
-                        found = True
-                    else:
-                        lines.append(line)
-                if not found:
-                    if "[Settings]" not in prev:
-                        lines.insert(0, "[Settings]")
-                    lines.append(f"gtk-application-prefer-dark-theme={prefer}")
-                settings.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            else:
-                settings.write_text(
-                    f"[Settings]\ngtk-application-prefer-dark-theme={prefer}\n",
-                    encoding="utf-8",
-                )
+            prev = settings.read_text(encoding="utf-8") if settings.is_file() else ""
+            prev = _upsert_ini_key(prev, "gtk-application-prefer-dark-theme", prefer)
+            prev = _upsert_ini_key(prev, "gtk-theme-name", SHELL_GTK_THEME)
+            prev = _upsert_ini_key(
+                prev, "gtk-icon-theme-name", _papirus_icon_theme(profile.is_dark())
+            )
+            prev = _upsert_ini_key(prev, "gtk-button-images", "1")
+            prev = _upsert_ini_key(prev, "gtk-menu-images", "1")
+            settings.write_text(prev, encoding="utf-8")
         except OSError:
             pass
+    _sync_shell_gtk_theme(profile)
     _sync_gsettings_color_scheme(profile.is_dark())
 
 
@@ -1330,13 +1439,378 @@ window.filechooser button.suggested-action {{
 """
 
 
+def _strip_managed_css_markers(block: str) -> str:
+    return (
+        block.replace(_GTK_USER_CSS_BEGIN, "").replace(_GTK_USER_CSS_END, "").strip()
+        + "\n"
+    )
+
+
+def _upsert_ini_key(text: str, key: str, value: str) -> str:
+    lines: list[str] = []
+    found = False
+    body = text or ""
+    if "[Settings]" not in body:
+        lines.append("[Settings]")
+    for line in body.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(f"{key}=") or stripped.startswith(f"{key} "):
+            lines.append(f"{key}={value}")
+            found = True
+        else:
+            lines.append(line)
+    if not found:
+        if "[Settings]" not in "\n".join(lines):
+            lines.insert(0, "[Settings]")
+        lines.append(f"{key}={value}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _shell_theme_roots() -> list[Path]:
+    home = Path.home()
+    xdg = Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))
+    return [home / ".themes" / SHELL_GTK_THEME, xdg / "themes" / SHELL_GTK_THEME]
+
+
+def _shell_theme_index(profile: Profile) -> str:
+    variant = "dark" if profile.is_dark() else "light"
+    return (
+        "[Desktop Entry]\n"
+        "Type=X-GNOME-Metatheme\n"
+        "Name=Neuronix\n"
+        f"Comment=Generated by gtk-theme from profile {profile.id} ({variant})\n"
+        "Encoding=UTF-8\n"
+        "\n"
+        "[X-GNOME-Metatheme]\n"
+        f"GtkTheme={SHELL_GTK_THEME}\n"
+        "MetacityTheme=Adwaita\n"
+        f"IconTheme={_papirus_icon_theme(profile.is_dark())}\n"
+        "CursorTheme=Adwaita\n"
+        "ButtonLayout=:minimize,maximize,close\n"
+    )
+
+
+def _shell_theme_gtk3_css(profile: Profile) -> str:
+    imported = (
+        '@import url("resource:///org/gtk/libgtk/theme/Adwaita/gtk-contained-dark.css");\n'
+        if profile.is_dark()
+        else '@import url("resource:///org/gtk/libgtk/theme/Adwaita/gtk-contained.css");\n'
+    )
+    return (
+        f"/* Generated by gtk-theme ({profile.id}) — rewritten on profile change. */\n"
+        f"{imported}\n"
+        f"{_strip_managed_css_markers(_system_dialog_css(profile))}"
+    )
+
+
+def _shell_theme_gtk4_extra(profile: Profile) -> str:
+    bg = profile.background
+    fg = profile.foreground
+    surface = profile.surface_hex()
+    border = profile.surface_alt_hex()
+    accent = profile.accent()
+    on_accent = "#fbf1c7" if _relative_luminance(accent) < 0.55 else "#1d2021"
+    hover = _mix_hex(bg, fg, 0.12)
+    r, g, b = _parse_hex(accent)
+    outline = f"rgba({r}, {g}, {b}, 0.7)"
+    return f"""
+/* GTK4 combinators (Adwaita Default hard-codes #15539e on scales). */
+.background {{
+  color: {fg};
+  background-color: {bg};
+}}
+.view, iconview, textview > text {{
+  color: {fg};
+  background-color: {bg};
+}}
+headerbar, headerbar.windowhandle {{
+  background-color: {surface};
+  color: {fg};
+  border-bottom-color: {border};
+}}
+progressbar > trough > progress, scale > trough > highlight {{
+  border: 1px solid {accent};
+  background-color: {accent};
+  background-image: none;
+}}
+scale > trough {{
+  background-color: {border};
+  border-color: {border};
+}}
+scale > trough > slider {{
+  background-image: none;
+  background-color: {accent};
+  border-color: {accent};
+}}
+scale > trough > slider:hover {{
+  background-image: none;
+  background-color: {hover};
+}}
+scale:focus:focus-visible > trough {{
+  outline-color: {outline};
+}}
+switch:checked {{
+  background-color: {accent};
+  border-color: {accent};
+}}
+check:checked, radio:checked,
+checkbutton > check:checked, radiobutton > radio:checked {{
+  background-color: {accent};
+  border-color: {accent};
+  color: {on_accent};
+}}
+.view:selected, listview > row:selected, gridview > child:selected {{
+  background-color: {accent};
+  color: {on_accent};
+}}
+/* gtk-files location bar: breadcrumbs live in scrolledwindow which otherwise
+ * inherits the dark window bg and looks inset vs the header. */
+.pathbar,
+.pathbar scrolledwindow,
+.pathbar scrolledwindow > viewport,
+.pathbar viewport,
+.pathbar > stack,
+.pathbar .linked {{
+  background-color: transparent;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+}}
+pathbar button,
+.pathbar button {{
+  background: transparent;
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+  color: {fg};
+}}
+pathbar button:hover,
+.pathbar button:hover {{
+  background-color: {hover};
+  color: {fg};
+}}
+"""
+
+
+def _shell_theme_gtk4_css(profile: Profile) -> str:
+    imported = (
+        '@import url("resource:///org/gtk/libgtk/theme/Default-dark/gtk.css");\n'
+        if profile.is_dark()
+        else '@import url("resource:///org/gtk/libgtk/theme/Default/gtk.css");\n'
+    )
+    return (
+        f"/* Generated by gtk-theme ({profile.id}) — rewritten on profile change. */\n"
+        f"{imported}\n"
+        f"{_strip_managed_css_markers(_system_dialog_css_gtk4(profile))}\n"
+        f"{_strip_managed_css_markers(_system_dialog_css(profile))}"
+        f"{_shell_theme_gtk4_extra(profile)}"
+    )
+
+
+def _sync_hypr_gtk_theme_env(is_dark: bool = True) -> None:
+    icons = _papirus_icon_theme(is_dark)
+    replacements = {
+        "GTK_THEME": SHELL_GTK_THEME,
+        "GTK_ICON_THEME": icons,
+        "XDG_ICON_THEME": icons,
+    }
+    for path in _config_candidates("hypr/hyprland.conf"):
+        if not path.is_file():
+            continue
+        try:
+            original = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        updated = original
+        for key, value in replacements.items():
+            needle = re.compile(rf"^env\s*=\s*{re.escape(key)}\s*,\s*.+$", re.MULTILINE)
+            line = f"env = {key},{value}"
+            if needle.search(updated):
+                updated = needle.sub(line, updated)
+        if updated != original:
+            try:
+                path.write_text(updated, encoding="utf-8")
+            except OSError:
+                pass
+    os.environ["GTK_THEME"] = SHELL_GTK_THEME
+    os.environ["GTK_ICON_THEME"] = icons
+    os.environ["XDG_ICON_THEME"] = icons
+    if shutil.which("dbus-update-activation-environment"):
+        try:
+            subprocess.run(
+                [
+                    "dbus-update-activation-environment",
+                    "--systemd",
+                    "GTK_THEME",
+                    "GTK_ICON_THEME",
+                    "XDG_ICON_THEME",
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=5,
+            )
+        except Exception:
+            pass
+
+
+def _sync_shell_gtk_theme(profile: Profile) -> None:
+    """Write ~/.themes/neuronix (+ XDG themes) so GTK4 apps follow the profile."""
+    gtk3 = _shell_theme_gtk3_css(profile)
+    gtk4 = _shell_theme_gtk4_css(profile)
+    index = _shell_theme_index(profile)
+    for root in _shell_theme_roots():
+        try:
+            (root / "gtk-3.0").mkdir(parents=True, exist_ok=True)
+            (root / "gtk-4.0").mkdir(parents=True, exist_ok=True)
+            (root / "index.theme").write_text(index, encoding="utf-8")
+            (root / "gtk-3.0" / "gtk.css").write_text(gtk3, encoding="utf-8")
+            (root / "gtk-4.0" / "gtk.css").write_text(gtk4, encoding="utf-8")
+        except OSError:
+            continue
+    _sync_hypr_gtk_theme_env(profile.is_dark())
+
+
+def _upsert_xsettings_key(text: str, key: str, value: str) -> str:
+    line_out = f'{key} "{value}"'
+    lines: list[str] = []
+    found = False
+    for line in (text or "").splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(f"{key} ") or stripped.startswith(f"{key}\t"):
+            lines.append(line_out)
+            found = True
+        else:
+            lines.append(line)
+    if not found:
+        lines.append(line_out)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _upsert_gtkrc_key(text: str, key: str, value: str) -> str:
+    line_out = f'{key}="{value}"'
+    lines: list[str] = []
+    found = False
+    for line in (text or "").splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(f"{key}=") or stripped.startswith(f"{key} "):
+            lines.append(line_out)
+            found = True
+        else:
+            lines.append(line)
+    if not found:
+        lines.append(line_out)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _xfconf_set_string(prop: str, value: str) -> None:
+    if not shutil.which("xfconf-query"):
+        return
+    try:
+        r = subprocess.run(
+            ["xfconf-query", "-c", "xsettings", "-p", prop],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+        cmd = ["xfconf-query", "-c", "xsettings", "-p", prop, "-s", value]
+        if r.returncode != 0:
+            cmd = [
+                "xfconf-query",
+                "-c",
+                "xsettings",
+                "-n",
+                "-t",
+                "string",
+                "-p",
+                prop,
+                "-s",
+                value,
+            ]
+        subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+
+def _sync_session_icon_theme(is_dark: bool) -> None:
+    icons = _papirus_icon_theme(is_dark)
+    for path in _all_existing_configs("xsettingsd/xsettingsd.conf"):
+        try:
+            original = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        out = _upsert_xsettings_key(original, "Net/IconThemeName", icons)
+        if out != original:
+            try:
+                path.write_text(out, encoding="utf-8")
+            except OSError:
+                pass
+    try:
+        subprocess.run(
+            ["pkill", "-HUP", "-x", "xsettingsd"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=3,
+        )
+    except Exception:
+        pass
+    gtkrc_paths = list(_config_candidates("gtkrc-2.0"))
+    gtkrc_paths.append(Path.home() / ".gtkrc-2.0")
+    seen: set[Path] = set()
+    for path in gtkrc_paths:
+        if not path.is_file():
+            continue
+        try:
+            key = path.resolve()
+        except OSError:
+            key = path
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            original = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        out = _upsert_gtkrc_key(original, "gtk-icon-theme-name", icons)
+        if out != original:
+            try:
+                path.write_text(out, encoding="utf-8")
+            except OSError:
+                pass
+    for path in _all_existing_configs("fuzzel/fuzzel.ini"):
+        try:
+            original = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        out = _replace_ini_assign(original, "icon-theme", icons)
+        if out != original:
+            try:
+                path.write_text(out, encoding="utf-8")
+            except OSError:
+                pass
+
+
 def _sync_gsettings_color_scheme(is_dark: bool) -> None:
     scheme = "prefer-dark" if is_dark else "prefer-light"
-    theme = "Adwaita-dark" if is_dark else "Adwaita"
+    theme = SHELL_GTK_THEME
+    icons = _papirus_icon_theme(is_dark)
     if shutil.which("gsettings"):
         for args in (
             ["set", "org.gnome.desktop.interface", "color-scheme", scheme],
             ["set", "org.gnome.desktop.interface", "gtk-theme", theme],
+            ["set", "org.gnome.desktop.interface", "icon-theme", icons],
         ):
             try:
                 subprocess.run(
@@ -1350,40 +1824,9 @@ def _sync_gsettings_color_scheme(is_dark: bool) -> None:
             except Exception:
                 pass
     # XFCE Power Manager / xfsettingsd read this channel (may be empty on Hyprland).
-    if shutil.which("xfconf-query"):
-        try:
-            r = subprocess.run(
-                ["xfconf-query", "-c", "xsettings", "-p", "/Net/ThemeName"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=5,
-            )
-            cmd = ["xfconf-query", "-c", "xsettings", "-p", "/Net/ThemeName", "-s", theme]
-            if r.returncode != 0:
-                cmd = [
-                    "xfconf-query",
-                    "-c",
-                    "xsettings",
-                    "-n",
-                    "-t",
-                    "string",
-                    "-p",
-                    "/Net/ThemeName",
-                    "-s",
-                    theme,
-                ]
-            subprocess.run(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=5,
-            )
-        except Exception:
-            pass
+    _xfconf_set_string("/Net/ThemeName", theme)
+    _xfconf_set_string("/Net/IconThemeName", icons)
+    _sync_session_icon_theme(is_dark)
 
 
 def _config_candidates(rel: str) -> list[Path]:
@@ -1430,6 +1873,32 @@ def _all_existing_configs(rel: str) -> list[Path]:
     return out
 
 
+def _promote_waybar_hardcoded_to_vars(css: str) -> str:
+    lines = css.splitlines(keepends=True)
+    out: list[str] = []
+    for line in lines:
+        bare = line.rstrip("\r\n")
+        nl = line[len(bare) :]
+        trimmed = bare.strip()
+        indent = bare[: len(bare) - len(bare.lstrip())]
+        if trimmed in ("color: #f5f5f5;", "color: #ffffff;"):
+            out.append(f"{indent}color: @wb_fg;{nl or chr(10)}")
+        elif trimmed == "color: #cccccc;":
+            out.append(f"{indent}color: @wb_muted;{nl or chr(10)}")
+        elif trimmed == "color: #888888;":
+            out.append(f"{indent}color: @wb_dim;{nl or chr(10)}")
+        elif (
+            trimmed.startswith("background: #2e2e2e")
+            or trimmed.startswith("background-color: #2e2e2e")
+            or trimmed.startswith("background: #0a0a0a")
+        ):
+            prop = "background-color" if trimmed.startswith("background-color") else "background"
+            out.append(f"{indent}{prop}: @wb_surface;{nl or chr(10)}")
+        else:
+            out.append(line)
+    return "".join(out)
+
+
 def _rewrite_waybar_global_colors(css: str, fg: str, surface: str) -> str:
     lines = css.splitlines(keepends=True)
     out: list[str] = []
@@ -1459,10 +1928,23 @@ def _rewrite_waybar_global_colors(css: str, fg: str, surface: str) -> str:
 
 
 def _restart_waybar() -> None:
-    # Prefer the user unit so style.css reloads cleanly. SIGUSR2 alone often
-    # leaves a stale bar; bare killall+spawn can leave zombies.
-    if _theme_session_safe():
-        if shutil.which("killall"):
+    # Hyprland starts waybar as a session child. The distro user unit requires
+    # graphical-session.target (inactive here), so systemctl restart fails and
+    # a follow-up killall leaves the bar dead. Reload CSS in-place when the
+    # process is alive; only spawn when it is not.
+    if shutil.which("pgrep") and shutil.which("killall"):
+        try:
+            alive = subprocess.run(
+                ["pgrep", "-x", "waybar"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=3,
+            )
+        except Exception:
+            alive = None
+        if alive is not None and alive.returncode == 0:
             try:
                 subprocess.run(
                     ["killall", "-SIGUSR2", "waybar"],
@@ -1474,32 +1956,7 @@ def _restart_waybar() -> None:
                 )
             except Exception:
                 pass
-        return
-    try:
-        r = subprocess.run(
-            ["systemctl", "--user", "restart", "waybar.service"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            timeout=8,
-        )
-        if r.returncode == 0:
             return
-    except Exception:
-        pass
-    try:
-        subprocess.run(
-            ["killall", "waybar"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            timeout=5,
-        )
-    except Exception:
-        pass
-    time.sleep(0.2)
     try:
         r = subprocess.run(
             ["hyprctl", "dispatch", "exec", "waybar"],
@@ -1525,40 +1982,88 @@ def _restart_waybar() -> None:
         pass
 
 
+def _css_rgba(hex_color: str, alpha: float) -> str:
+    r, g, b = _parse_hex(hex_color)
+    return f"rgba({r}, {g}, {b}, {alpha:.2f})"
+
+
+def _waybar_vars_block(
+    fg: str, bg: str, surface: str, inactive0: str, inactive1: str
+) -> str:
+    dim = _mix_hex(fg, surface, 0.35)
+    muted = _mix_hex(fg, surface, 0.15)
+    hover = _css_rgba(surface, 0.45)
+    return f"""{_WAYBAR_VARS_BEGIN}
+@define-color wb_fg {fg};
+@define-color wb_bg {bg};
+@define-color wb_surface {surface};
+@define-color wb_dim {dim};
+@define-color wb_muted {muted};
+@define-color wb_inactive0 {inactive0};
+@define-color wb_inactive1 {inactive1};
+@define-color wb_hover {hover};
+{_WAYBAR_VARS_END}
+"""
+
+
+def _waybar_gtk_color_refs(css: str) -> str:
+    # GTK3 (Waybar) does not parse CSS custom properties. Map leftover var()
+    # names from the first stylesheet attempt onto @define-color tokens.
+    for src, dst in (
+        ("var(--wb-fg)", "@wb_fg"),
+        ("var(--wb-bg)", "@wb_bg"),
+        ("var(--wb-surface)", "@wb_surface"),
+        ("var(--wb-dim)", "@wb_dim"),
+        ("var(--wb-muted)", "@wb_muted"),
+        ("var(--wb-inactive0)", "@wb_inactive0"),
+        ("var(--wb-inactive1)", "@wb_inactive1"),
+        ("var(--wb-hover)", "@wb_hover"),
+    ):
+        css = css.replace(src, dst)
+    return css
+
+
 def _sync_waybar_style(
     bg: str, fg: str, border: str, surface: str, inactive0: str, inactive1: str
 ) -> None:
+    del border  # window chrome uses inactive gradient, not the GTK border token
     paths = _all_existing_configs("waybar/style.css")
     if not paths:
         return
+    block = _waybar_vars_block(fg, bg, surface, inactive0, inactive1)
     for path in paths:
         try:
-            original = path.read_text(encoding="utf-8")
+            existing = path.read_text(encoding="utf-8") if path.is_file() else ""
         except OSError:
             continue
-        out = original
-        out = _rewrite_css_block(
-            out,
-            "window#waybar",
-            f"  background-color: {bg};\n  color: {fg};\n"
-            f"  border-bottom: none;\n  padding-bottom: 10px;\n"
-            f"  background-image: linear-gradient(\n"
-            f"    90deg,\n"
-            f"    {inactive1} 0%,\n"
-            f"    {inactive0} 50%,\n"
-            f"    {inactive1} 100%\n"
-            f"  );\n"
-            f"  background-size: 100% 10px;\n"
-            f"  background-position: left bottom;\n"
-            f"  background-repeat: no-repeat;",
+        out = _upsert_managed_css_block(
+            existing, block, _WAYBAR_VARS_BEGIN, _WAYBAR_VARS_END
         )
-        out = _rewrite_css_block(
-            out,
-            "#workspaces button.active",
-            f"  color: {fg};\n  background: {surface};",
-        )
-        out = _rewrite_waybar_global_colors(out, fg, surface)
-        if out != original:
+        out = _waybar_gtk_color_refs(out)
+        if "@define-color wb_fg" not in existing or "var(--wb-" in existing:
+            out = _rewrite_css_block(
+                out,
+                "window#waybar",
+                "  background-color: @wb_bg;\n  color: @wb_fg;\n"
+                "  border-bottom: none;\n  padding-bottom: 10px;\n"
+                "  background-image: linear-gradient(\n"
+                "    90deg,\n"
+                "    @wb_inactive1 0%,\n"
+                "    @wb_inactive0 50%,\n"
+                "    @wb_inactive1 100%\n"
+                "  );\n"
+                "  background-size: 100% 10px;\n"
+                "  background-position: left bottom;\n"
+                "  background-repeat: no-repeat;",
+            )
+            out = _rewrite_css_block(
+                out,
+                "#workspaces button.active",
+                "  color: @wb_fg;\n  background: @wb_surface;",
+            )
+            out = _promote_waybar_hardcoded_to_vars(out)
+            out = _waybar_gtk_color_refs(out)
+        if out != existing:
             try:
                 path.write_text(out, encoding="utf-8")
             except OSError:
@@ -1606,23 +2111,31 @@ def _replace_ini_section_assign(text: str, section: str, key: str, value: str) -
     return "".join(out)
 
 
-def _sync_mako_colors(bg: str, fg: str, border: str) -> None:
-    path = _first_existing_config("mako/config")
-    if path is None:
+def _sync_mako_colors(bg: str, fg: str, border: str, surface: str) -> None:
+    del surface
+    paths = _all_existing_configs("mako/config")
+    if not paths:
         return
-    try:
-        original = path.read_text(encoding="utf-8")
-    except OSError:
-        return
-    out = original
-    out = _replace_ini_assign(out, "background-color", bg)
-    out = _replace_ini_assign(out, "text-color", fg)
-    out = _replace_ini_assign(out, "border-color", border)
-    if out != original:
+    progress = _mix_hex(fg, bg, 0.55)
+    wrote = False
+    for path in paths:
         try:
-            path.write_text(out, encoding="utf-8")
+            original = path.read_text(encoding="utf-8")
         except OSError:
-            return
+            continue
+        out = original
+        out = _replace_ini_assign(out, "background-color", bg)
+        out = _replace_ini_assign(out, "text-color", fg)
+        out = _replace_ini_assign(out, "border-color", border)
+        out = _replace_ini_assign(out, "progress-color", progress)
+        if out != original:
+            try:
+                path.write_text(out, encoding="utf-8")
+                wrote = True
+            except OSError:
+                pass
+    if not wrote and not shutil.which("makoctl"):
+        return
     if shutil.which("makoctl"):
         try:
             subprocess.run(
@@ -1635,6 +2148,74 @@ def _sync_mako_colors(bg: str, fg: str, border: str) -> None:
             )
         except Exception:
             pass
+
+
+def _sync_hypr_workspace_background(bg: str) -> None:
+    rgb = _hex_to_hypr_rgb(bg)
+    if not rgb:
+        return
+    wrote = False
+    for path in _hypr_conf_paths():
+        if path.name != "hyprland.conf":
+            continue
+        try:
+            original = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        out = _replace_hypr_assign(original, "background_color", rgb)
+        if out != original:
+            try:
+                path.write_text(out, encoding="utf-8")
+                wrote = True
+            except OSError:
+                pass
+    if wrote and not _theme_session_safe():
+        _hyprctl_keyword("misc:background_color", rgb)
+
+
+def _gtk_term_colors_toml(profile: Profile) -> str:
+    pal = "\n".join(f'    "{c}",' for c in profile.palette)
+    return (
+        "[colors]\n"
+        f'foreground = "{profile.foreground}"\n'
+        f'background = "{profile.background}"\n'
+        f"palette = [\n{pal}\n]\n"
+    )
+
+
+def _replace_toml_table(text: str, header: str, body: str) -> str:
+    """Replace a TOML table. Next table is a line that starts with ``[name]``."""
+    start = text.find(header)
+    if start < 0:
+        out = text.rstrip() + "\n\n" + body.rstrip() + "\n"
+        return out
+    rest = text[start + len(header) :]
+    nxt = re.search(r"(?m)^\[[A-Za-z0-9._-]+\]", rest)
+    end = start + len(header) + nxt.start() if nxt else len(text)
+    out = text[:start] + body.rstrip() + "\n"
+    after = text[end:]
+    if after:
+        if not out.endswith("\n"):
+            out += "\n"
+        out += after
+        if not after.endswith("\n"):
+            out += "\n"
+    return out
+
+
+def _sync_gtk_term_colors(profile: Profile) -> None:
+    body = _gtk_term_colors_toml(profile)
+    for path in _all_existing_configs("gtk-apps/gtk-term/config.toml"):
+        try:
+            original = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        out = _replace_toml_table(original, "[colors]", body)
+        if out != original:
+            try:
+                path.write_text(out, encoding="utf-8")
+            except OSError:
+                pass
 
 
 def _bare_rgba(hex_color: str, alpha: str = "ff") -> str:

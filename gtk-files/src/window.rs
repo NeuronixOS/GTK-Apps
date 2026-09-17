@@ -11,6 +11,7 @@ use gtk::glib;
 use gtk::glib::prelude::*;
 use gtk::prelude::*;
 
+use crate::archive::{self, CompressFormat};
 use crate::clipboard::{self, ClipOp, SharedClipboard};
 use crate::config::Config;
 use crate::file_ops;
@@ -945,6 +946,12 @@ impl FilesWindow {
                 fw.action_convert(format);
             });
         }
+        bind(win, "extract-here", self, |fw, _, _| fw.action_extract_here());
+        for format in [CompressFormat::Zip, CompressFormat::TarGz] {
+            bind(win, format.action_name(), self, move |fw, _, _| {
+                fw.action_compress(format);
+            });
+        }
         bind(win, "preferences", self, |fw, _, _| {
             let config = Rc::clone(&fw.config);
             let fw2 = Rc::clone(fw);
@@ -1552,6 +1559,28 @@ impl FilesWindow {
             return;
         }
         let n = scripts::convert_files(Some(&self.window), &paths, format);
+        if n > 0 {
+            self.current_tab().refresh();
+        }
+    }
+
+    fn action_extract_here(&self) {
+        let paths = self.target_paths();
+        if paths.is_empty() {
+            return;
+        }
+        let n = archive::extract_here(Some(&self.window), &paths);
+        if n > 0 {
+            self.current_tab().refresh();
+        }
+    }
+
+    fn action_compress(&self, format: CompressFormat) {
+        let paths = self.target_paths();
+        if paths.is_empty() {
+            return;
+        }
+        let n = archive::compress_selection(Some(&self.window), &paths, format);
         if n > 0 {
             self.current_tab().refresh();
         }
@@ -2192,6 +2221,27 @@ fn show_context_menu(
             icons.append_action(&scripts_menu, "Convert to PDF", "win.convert-to-pdf");
             icons.append_action(&scripts_menu, "Convert to WebP", "win.convert-to-webp");
             icons.append_submenu(&menu, "Scripts", &scripts_menu, "system-run-symbolic");
+        }
+
+        let any_archive = paths.iter().any(|p| archive::is_archive(p));
+        if any_archive {
+            // Top-level shortcuts: extract into the current folder (unzip/untar here).
+            let extract = gio::Menu::new();
+            icons.append_action(&extract, "Unzip / Untar Here", "win.extract-here");
+            menu.append_section(None, &extract);
+        }
+        if !paths.is_empty() {
+            let archive_menu = gio::Menu::new();
+            if any_archive {
+                icons.append_action(&archive_menu, "Unzip / Untar Here", "win.extract-here");
+            }
+            icons.append_action(&archive_menu, "Compress as ZIP…", "win.compress-zip");
+            icons.append_action(
+                &archive_menu,
+                "Compress as tar.gz…",
+                "win.compress-tar-gz",
+            );
+            icons.append_submenu(&menu, "Archive", &archive_menu, "package-x-generic-symbolic");
         }
 
         // Symbolic-link actions only make sense for a single link.

@@ -31,4 +31,5 @@ from .gtk_theme import (  # noqa: F401
     sync_desktop_theme,
     sync_shell_chrome,
     watch_theme,
+    SHELL_GTK_THEME,
 )

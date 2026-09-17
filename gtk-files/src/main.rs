@@ -1,5 +1,6 @@
 //! gtk-files: a GTK4 file manager written in Rust (Nautilus / GNOME Files port).
 
+mod archive;
 mod clipboard;
 mod config;
 mod dnd;
@@ -335,6 +336,22 @@ fn load_css() {
         .pathbar button {
             padding-left: 6px;
             padding-right: 6px;
+            background: transparent;
+            background-color: transparent;
+            border: none;
+            box-shadow: none;
+        }
+        /* Keep breadcrumbs matching the header — not the darker window bg. */
+        .pathbar,
+        .pathbar scrolledwindow,
+        .pathbar scrolledwindow > viewport,
+        .pathbar viewport,
+        .pathbar > stack,
+        .pathbar .linked {
+            background-color: transparent;
+            background-image: none;
+            border: none;
+            box-shadow: none;
         }
         .file-list {
             padding: 4px;
