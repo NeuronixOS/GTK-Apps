@@ -69,8 +69,6 @@ syn-to-devices.sh
 **/websites.json
 **/websites_thumbnail_overrides.json
 **/websites_img/
-**/workspaces.json
-**/work_time_zones_data.json
 *.json.bak
 
 # gtk-photos: ignore in-tree JSON runtime copies; keep *.dist.json templates

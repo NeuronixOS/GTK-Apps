@@ -17,9 +17,6 @@ Suite of GTK4 desktop apps for Neuronix. Apps share color profiles and UI chrome
 | `gtk-configs` | Python | Neuronix config tree editor (`~/configs` or `--root`): Hyprland, Waybar, Fuzzel, Mako, colors, raw files |
 | `gtk-meld` | Python | Visual diff / merge tool (Meld-based, GTK4) |
 | `gtk-photos` | Python | Photo organizer (drive browse, favorites, folders, website thumbnails) |
-| `gtk-meetings` | Python | Paste JSON events and import them into Google Calendar (OAuth) |
-| `gtk-workspaces` | Python | Named workspace launcher (run command sets) |
-| `gtk-worktimezone` | Python | Coworker timezone tracker (edit/view local times across zones) |
 | `gtk-sync` | Rust | LAN file sync (client + server): HTTPS/TLS mesh, CouchDB metadata, systemd `gtk-sync` / `gtk-sync-client` |
 
 Shared libraries (not launched as suite windows by default):

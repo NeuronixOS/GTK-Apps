@@ -7,7 +7,7 @@
 # Usage:
 #   ./build-launch.sh                         # all apps
 #   ./build-launch.sh gtk-files               # one app
-#   ./build-launch.sh gtk-files gtk-meetings
+#   ./build-launch.sh gtk-files gtk-photos
 #   ./build-launch.sh --linuxos /path/to/LinuxOS
 #   ./build-launch.sh --local gtk-files       # also install into /usr/local
 #
@@ -41,8 +41,7 @@ With no extra flags this script syncs into the sibling LinuxOS tree (next ISO)
 and, on a Neuronix/KvNix machine, into /usr/local (this computer).
 
 Apps: gtk-calc gtk-edit gtk-files gtk-image gtk-video gtk-term gtk-theme-editor
-      gtk-meetings gtk-workspaces gtk-worktimezone gtk-photos gtk-colors
-      gtk-ytmusic
+      gtk-photos gtk-colors
 EOF
 }
 
@@ -78,12 +77,8 @@ ALL_APPS=(
   gtk-video
   gtk-term
   gtk-theme-editor
-  gtk-meetings
-  gtk-workspaces
-  gtk-worktimezone
   gtk-photos
   gtk-colors
-  gtk-ytmusic
 )
 
 is_known_app() {
@@ -116,8 +111,6 @@ app_launch_cmd() {
     echo "python3 $dir/app.py"
   elif [[ -f "$dir/colors.py" ]]; then
     echo "python3 $dir/colors.py"
-  elif [[ -f "$dir/work_time_zones.py" ]]; then
-    echo "python3 $dir/work_time_zones.py"
   else
     return 1
   fi
@@ -135,25 +128,12 @@ app_stop_spec() {
       # never matches. Match the full launched binary path instead.
       echo "pattern:${ROOT}/gtk-theme-editor/target/release/gtk-theme-editor"
       ;;
-    gtk-meetings)
-      echo "pattern:${ROOT}/gtk-meetings/app.py"
-      ;;
-    gtk-workspaces)
-      echo "pattern:${ROOT}/gtk-workspaces/app.py"
-      ;;
-    gtk-worktimezone)
-      echo "pattern:${ROOT}/gtk-worktimezone/work_time_zones.py"
-      ;;
     gtk-photos)
       # Launched as `python3 -m src.main` from the app directory.
       echo "cwd:${ROOT}/gtk-photos"
       ;;
     gtk-colors)
       echo "pattern:${ROOT}/gtk-colors/colors.py"
-      ;;
-    gtk-ytmusic)
-      # Chromium --app uses our isolated profile; WebKit mode runs app.py.
-      echo "pattern:gtk-ytmusic/chromium-profile|${ROOT}/gtk-ytmusic/app.py"
       ;;
     *)
       echo "pattern:${ROOT}/${app}"
