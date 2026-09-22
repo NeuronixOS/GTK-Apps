@@ -174,6 +174,17 @@ class MeldSourceView(GtkSource.View, SourceViewHelperMixin):
         flags=(GObject.ParamFlags.READWRITE | GObject.ParamFlags.CONSTRUCT),
     )
 
+    paint_unique_as_removed = GObject.Property(
+        type=bool,
+        default=False,
+        nick="Swap insert/delete chunk colours",
+        blurb=(
+            "In a two-way diff the Differ tags right-only lines as delete; "
+            "set this on the right pane so they paint green (insert) instead "
+            "of red. Left-only lines are already tagged delete and stay red."
+        ),
+    )
+
     @GObject.Signal(name="popup-menu")
     def popup_menu(self) -> None: ...
 
@@ -199,7 +210,11 @@ class MeldSourceView(GtkSource.View, SourceViewHelperMixin):
             SYNCPOINT_SENTINEL, SYNCPOINT_MARK_CATEGORY, buf.get_start_iter()
         )
         self.set_buffer(buf)
+        self.fill_colors, self.line_colors = get_common_theme()
         self.connect("notify::overscroll-num-lines", self.notify_overscroll)
+        self.connect(
+            "notify::paint-unique-as-removed", self._on_paint_unique_as_removed
+        )
 
     @property
     def line_height(self) -> int:
@@ -213,6 +228,14 @@ class MeldSourceView(GtkSource.View, SourceViewHelperMixin):
 
     def notify_overscroll(self, view, param):
         self.props.bottom_margin = self.overscroll_num_lines * self.line_height
+
+    def _on_paint_unique_as_removed(self, *args):
+        try:
+            self.on_setting_changed(get_meld_settings(), "style-scheme")
+        except Exception:
+            self.fill_colors, self.line_colors = get_common_theme(
+                swap_insert_delete=self.paint_unique_as_removed
+            )
 
     def do_paste_clipboard(self, *args):
         # This is an awful hack to replace another awful hack. The idea
@@ -261,7 +284,9 @@ class MeldSourceView(GtkSource.View, SourceViewHelperMixin):
             self.syncpoint_color = colour_lookup_with_fallback(
                 "meld:syncpoint-outline", "foreground"
             )
-            self.fill_colors, self.line_colors = get_common_theme()
+            self.fill_colors, self.line_colors = get_common_theme(
+                swap_insert_delete=self.paint_unique_as_removed
+            )
 
             buf = self.get_buffer()
             buf.set_style_scheme(settings.style_scheme)

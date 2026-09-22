@@ -310,6 +310,9 @@ class TextViewChunkMap(ChunkMap):
 
         y, h = self.textview.get_line_yrange(buf.get_end_iter())
         max_y = float(y + h)
+        if getattr(self.textview, "fill_colors", None):
+            self.fill_colors = self.textview.fill_colors
+            self.line_colors = self.textview.line_colors
         for chunk in self.chunks:
             _found, start_iter = buf.get_iter_at_line(chunk.start_a)
             y0, _ = self.textview.get_line_yrange(start_iter)

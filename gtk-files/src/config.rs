@@ -196,8 +196,6 @@ impl Config {
                 // (typically ≥ 280). Remap to a usable bottom-panel height.
                 if text.contains("terminal_width") && !text.contains("terminal_height") {
                     loaded.window.terminal_height = 200;
-                } else if loaded.window.terminal_height >= 280 {
-                    loaded.window.terminal_height = 200;
                 }
                 loaded
             }
@@ -206,7 +204,7 @@ impl Config {
         // Keep icon_size and thumbnail_size consistent; migrate old XX names.
         cfg.view.thumbnail_size = normalize_thumbnail_name(&cfg.view.thumbnail_size);
         cfg.view.icon_size = thumbnail_pixels(&cfg.view.thumbnail_size);
-        cfg.window.terminal_height = cfg.window.terminal_height.clamp(120, 480);
+        cfg.window.terminal_height = cfg.window.terminal_height.clamp(120, 2400);
         cfg
     }
 

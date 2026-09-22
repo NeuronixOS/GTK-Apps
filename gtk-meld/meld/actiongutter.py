@@ -321,6 +321,14 @@ class ActionGutter(Gtk.Widget):
         height = self.get_allocated_height()
 
         buf = view.get_buffer()
+        if getattr(view, "fill_colors", None):
+            self.fill_colors = view.fill_colors
+            self.line_colors = view.line_colors
+            alpha = self.fill_colors["current-chunk-highlight"].alpha
+            self.chunk_highlights = {
+                state: alpha_tint(colour, alpha)
+                for state, colour in self.fill_colors.items()
+            }
 
         # Get our linked view's visible offset, get our vertical offset
         # against our view (e.g., for info bars at the top of the view)

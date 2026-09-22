@@ -8,7 +8,8 @@ Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/N
 - Places sidebar (Home, XDG dirs, Computer, Trash, USB Devices, **Network** mounts, bookmarks / favorites / recent in `places.toml`)
 - **Connect to Server** (SFTP / FTP / SMB / WebDAV via GVFS) — sidebar **Connect to Network…** lists remembered remotes; mounts add a `~/Network/<name>` shortcut
 - Tabbed browsing with closable, reorderable tabs
-- Breadcrumb path bar and editable location entry (`Ctrl+L`)
+- Breadcrumb path bar and editable location entry (`Ctrl+Shift+L`)
+- Bottom terminal tracks the folder (and `cd` in the terminal updates the file view)
 - Back / forward / up / home navigation history
 - List view (name, size, type, modified) and icon/grid view
 - Folder search filter (`Ctrl+F`) and Find in Files content search (`Ctrl+Shift+F`, regex supported)
@@ -99,7 +100,8 @@ Thumbnail sizes in grid view: `small` (48px), `medium` (64px), `large` (96px), `
 | `Alt+←` / `Alt+→` | Back / Forward |
 | `Alt+↑` | Parent folder |
 | `Alt+Home` | Home |
-| `Ctrl+L` | Enter location |
+| `Ctrl+L` | Clear bottom terminal |
+| `Ctrl+Shift+L` | Enter location |
 | `Ctrl+Alt+S` | Connect to Server |
 | Sidebar → Sync → Setup Sync | Launch gtk-sync installer (server or client) |
 | Sidebar → Sync (status / folder) | Active server status; click client folder to open it |

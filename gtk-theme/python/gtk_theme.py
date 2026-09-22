@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -60,6 +60,87 @@ _custom_mtime: float | None = None
 
 
 @dataclass(frozen=True)
+class WindowChrome:
+    border_size: int = 10
+    rounding: int = 8
+    bevel: str = "flat"
+    gradient: str = "ltr"
+    bar: Optional[tuple[str, str]] = None
+    bar_inactive: Optional[tuple[str, str]] = None
+    button_size: int = 18
+    button_kit: str = "gnome"
+    minimize: str = "−"
+    maximize: str = "□"
+    close: str = "×"
+    ninepatch: Optional[str] = None
+
+
+_BUTTON_KITS = {
+    "gnome": ("−", "□", "×"),
+    "macos": ("●", "●", "●"),
+    "nerd": ("󰖰", "󰖯", "󰖭"),
+}
+
+
+def _parse_chrome(raw: object) -> WindowChrome:
+    if not isinstance(raw, dict):
+        return WindowChrome()
+    buttons = raw.get("buttons") if isinstance(raw.get("buttons"), dict) else {}
+    kit = str(buttons.get("kit") or raw.get("button_kit") or "gnome")
+    glyphs = _BUTTON_KITS.get(kit, _BUTTON_KITS["gnome"])
+    try:
+        border_size = int(raw.get("border_size") or 10)
+    except (TypeError, ValueError):
+        border_size = 10
+    try:
+        rounding = int(raw.get("rounding") or 8)
+    except (TypeError, ValueError):
+        rounding = 8
+    try:
+        button_size = int(buttons.get("size") or 18)
+    except (TypeError, ValueError):
+        button_size = 18
+    bevel = str(raw.get("bevel") or "flat")
+    if bevel not in ("flat", "inner", "double"):
+        bevel = "flat"
+    gradient = str(raw.get("gradient") or "ltr").lower().replace("-", "_")
+    if gradient in ("rtl", "right_left", "right_to_left"):
+        gradient = "rtl"
+    else:
+        gradient = "ltr"
+    bar = None
+    bar_raw = raw.get("bar")
+    if isinstance(bar_raw, list) and bar_raw:
+        a = _normalize_hex(bar_raw[0])
+        b = _normalize_hex(bar_raw[1]) if len(bar_raw) > 1 else a
+        if a:
+            bar = (a, b or a)
+    bar_inactive = None
+    ibar_raw = raw.get("bar_inactive")
+    if isinstance(ibar_raw, list) and ibar_raw:
+        a = _normalize_hex(ibar_raw[0])
+        b = _normalize_hex(ibar_raw[1]) if len(ibar_raw) > 1 else a
+        if a:
+            bar_inactive = (a, b or a)
+    nine = raw.get("ninepatch")
+    ninepatch = nine if isinstance(nine, str) and nine.strip() else None
+    return WindowChrome(
+        border_size=max(1, min(32, border_size)),
+        rounding=max(0, min(48, rounding)),
+        bevel=bevel,
+        gradient=gradient,
+        bar=bar,
+        bar_inactive=bar_inactive,
+        button_size=max(10, min(36, button_size)),
+        button_kit=kit,
+        minimize=str(buttons.get("minimize") or glyphs[0]),
+        maximize=str(buttons.get("maximize") or glyphs[1]),
+        close=str(buttons.get("close") or glyphs[2]),
+        ninepatch=ninepatch,
+    )
+
+
+@dataclass(frozen=True)
 class Profile:
     id: str
     name: str
@@ -69,6 +150,7 @@ class Profile:
     border: Optional[str] = None
     border_active: Optional[tuple[str, str]] = None
     border_inactive: Optional[tuple[str, str]] = None
+    chrome: WindowChrome = field(default_factory=WindowChrome)
 
     def is_dark(self) -> bool:
         return _relative_luminance(self.background) < 0.45
@@ -104,11 +186,11 @@ class Profile:
 
     def hypr_active_border(self) -> Optional[str]:
         a, b = self.border_active_stops()
-        return _hypr_gradient(a, b)
+        return _hypr_gradient(a, b, self.chrome.gradient)
 
     def hypr_inactive_border(self) -> Optional[str]:
         a, b = self.border_inactive_stops()
-        return _hypr_gradient(a, b)
+        return _hypr_gradient(a, b, self.chrome.gradient)
 
     def accent(self) -> str:
         """Suite accent (ANSI blue / palette[4]) — Adwaita --accent-blue."""
@@ -184,6 +266,7 @@ def _load_custom_profiles() -> list[Profile]:
                     border=p.get("border") or None,
                     border_active=_parse_stops(p.get("border_active")),
                     border_inactive=_parse_stops(p.get("border_inactive")),
+                    chrome=_parse_chrome(p.get("chrome")),
                 )
             )
         except (KeyError, TypeError):
@@ -641,48 +724,44 @@ def apply_adw_color_scheme(profile: Optional[Profile] = None) -> None:
 
 
 def meld_chunk_colours(profile: Profile) -> tuple[dict[str, str], dict[str, str]]:
-    """Diff chunk fill/line colours derived from a suite profile palette.
+    """Diff chunk fill/line colours for meld.
 
-    Returns ``(fill_hex_by_name, line_hex_by_name)`` for meld's
+    Returns ``(fill_hex_by_name, line_hex_by_name)`` for
     :func:`meld.style.get_common_theme` keys.
 
-    Transparent overlays so syntax text stays readable:
-    green = add (insert), red = remove (delete), blue = changed (replace).
+    Git-style hues (not the profile ANSI table, which is often olive/teal):
+    green = new (insert), blue = edited (replace), red = removed (delete).
     """
     bg = profile.background
-    green = profile.palette[2] if len(profile.palette) > 2 else "#98971a"
-    red = profile.palette[1] if len(profile.palette) > 1 else "#cc241d"
-    # Blue for "changed" — palette index 4 is typically cyan/blue in 16-colour sets.
-    blue = profile.palette[4] if len(profile.palette) > 4 else "#458588"
-    if len(profile.palette) > 10:
-        green = profile.palette[10]
-    if len(profile.palette) > 9:
-        red = profile.palette[9]
-    if len(profile.palette) > 12:
-        blue = profile.palette[12]
+    if profile.is_dark():
+        green, red, blue = "#3fb950", "#f85149", "#4493f8"
+        fill_a, line_a, inline_a = 0.28, 0.80, 0.40
+    else:
+        green, red, blue = "#1a7f37", "#cf222e", "#0969da"
+        fill_a, line_a, inline_a = 0.22, 0.70, 0.32
 
     def _rgba(c: str, alpha: float) -> str:
         r, g, b = _parse_hex(c)
         return f"rgba({r}, {g}, {b}, {alpha:.2f})"
 
     fill_map = {
-        "insert": _rgba(green, 0.10),
-        "delete": _rgba(red, 0.10),
-        "conflict": _rgba(red, 0.14),
-        "replace": _rgba(blue, 0.10),
-        "error": _rgba(blue, 0.14),
+        "insert": _rgba(green, fill_a),
+        "delete": _rgba(red, fill_a),
+        "conflict": _rgba(red, min(1.0, fill_a + 0.08)),
+        "replace": _rgba(blue, fill_a),
+        "error": _rgba(blue, min(1.0, fill_a + 0.08)),
         "focus-highlight": profile.foreground,
-        "current-chunk-highlight": _rgba(profile.foreground, 0.05),
+        "current-chunk-highlight": _rgba(profile.foreground, 0.08),
         "overscroll": _rgba(profile.foreground, 0.04),
-        "inline": _rgba(blue, 0.16),
+        "inline": _rgba(blue, inline_a),
         "dimmed": _mix_hex(bg, profile.foreground, 0.45),
     }
     line_map = {
-        "insert": _rgba(green, 0.45),
-        "delete": _rgba(red, 0.45),
-        "conflict": _rgba(red, 0.55),
-        "replace": _rgba(blue, 0.45),
-        "error": _rgba(blue, 0.55),
+        "insert": _rgba(green, line_a),
+        "delete": _rgba(red, line_a),
+        "conflict": _rgba(red, min(1.0, line_a + 0.08)),
+        "replace": _rgba(blue, line_a),
+        "error": _rgba(blue, min(1.0, line_a + 0.08)),
     }
     return fill_map, line_map
 
@@ -722,18 +801,32 @@ def sync_hyprbars(profile: Optional[Profile] = None) -> bool:
     headerbars). Title and glyphs use the profile foreground.
     """
     profile = profile or load_profile()
-    return sync_hyprbars_colors(profile.surface_hex(), profile.foreground)
+    return sync_hyprbars_colors(
+        profile.surface_hex(), profile.foreground, chrome=profile.chrome
+    )
 
 
-def sync_hyprbars_colors(bar_hex: str, text_hex: str) -> bool:
-    bar_rgb = _hex_to_hypr_rgb(bar_hex)
+def sync_hyprbars_colors(
+    bar_hex: str, text_hex: str, chrome: Optional[WindowChrome] = None
+) -> bool:
+    ch = chrome or WindowChrome()
+    b0, b1 = _chrome_bar_stops(ch, bar_hex, text_hex)
+    i0, i1 = _chrome_bar_inactive_stops(ch, bar_hex)
+    bar_rgb = _hex_to_hypr_rgb(b0)
+    bar2_rgb = _hex_to_hypr_rgb(b1)
+    ibar_rgb = _hex_to_hypr_rgb(i0)
+    ibar2_rgb = _hex_to_hypr_rgb(i1)
     text_rgb = _hex_to_hypr_rgb(text_hex)
-    if not bar_rgb or not text_rgb:
+    if not bar_rgb or not bar2_rgb or not ibar_rgb or not ibar2_rgb or not text_rgb:
         return False
-    # rgb(RRGGBB) → rgba(RRGGBBff)
     bar_rgba = f"rgba({bar_rgb[4:10]}ff)"
+    bar2_rgba = f"rgba({bar2_rgb[4:10]}ff)"
+    ibar_rgba = f"rgba({ibar_rgb[4:10]}ff)"
+    ibar2_rgba = f"rgba({ibar2_rgb[4:10]}ff)"
+    direction = "rtl" if ch.gradient == "rtl" else "ltr"
+    if ch.button_kit == "nerd":
+        _ensure_symbols_nerd_font()
 
-    # 1) Persist so the next login / reload keeps the colors.
     path = _hyprland_conf_path()
     if path is not None and path.is_file():
         try:
@@ -743,25 +836,99 @@ def sync_hyprbars_colors(bar_hex: str, text_hex: str) -> bool:
         if original is not None:
             out = original
             out = _replace_hypr_assign(out, "bar_color", bar_rgba)
+            out = _replace_or_insert_hypr_assign(out, "bar_color2", bar2_rgba, "bar_color")
+            out = _replace_or_insert_hypr_assign(
+                out, "bar_color_inactive", ibar_rgba, "bar_color2"
+            )
+            out = _replace_or_insert_hypr_assign(
+                out, "bar_color_inactive2", ibar2_rgba, "bar_color_inactive"
+            )
+            out = _replace_or_insert_hypr_assign(
+                out, "bar_gradient", direction, "bar_color_inactive2"
+            )
             out = _replace_hypr_assign(out, "col.text", text_rgb)
-            out = _replace_hypr_assign(out, "inactive_button_color", bar_rgb)
-            out = _rewrite_hyprbars_buttons(out, bar_rgb, text_rgb)
+            out = _replace_hypr_assign(out, "inactive_button_color", ibar_rgb)
+            out = _replace_hypr_assign(out, "bar_text_font", _chrome_bar_font(ch))
+            out = _rewrite_hyprbars_buttons(out, bar_rgb, text_rgb, ch)
             if out != original:
                 try:
                     path.write_text(out, encoding="utf-8")
                 except OSError:
                     pass
 
-    # 2) Live update: keywords take effect immediately for bar/title/inactive fill.
-    #    Skip during session start — conf write is enough; hyprctl can race plugins.
     if not _theme_session_safe():
+        if ch.button_kit == "nerd":
+            _ensure_symbols_nerd_font()
         _hyprctl_keyword("plugin:hyprbars:bar_color", bar_rgba)
         _hyprctl_keyword("plugin:hyprbars:col.text", text_rgb)
-        _hyprctl_keyword("plugin:hyprbars:inactive_button_color", bar_rgb)
-        # Do not `hyprctl reload` here. Reload re-runs monitor= (including
-        # `monitor=,preferred,auto`) and rearranges displays. − □ × button
-        # colours persist in the conf and apply on the next login.
+        _hyprctl_keyword("plugin:hyprbars:inactive_button_color", ibar_rgb)
+        _hyprctl_keyword("plugin:hyprbars:bar_text_font", _chrome_bar_font(ch))
+        _hyprctl_hyprbarsgradient(
+            f"{bar_rgba} {bar2_rgba} {ibar_rgba} {ibar2_rgba} {direction}"
+        )
+        _apply_hyprbars_button_keywords(bar_rgb, text_rgb, ch)
     return True
+
+
+def _chrome_bar_font(chrome: WindowChrome) -> str:
+    return "Symbols Nerd Font" if chrome.button_kit == "nerd" else "DejaVu Sans"
+
+
+def _ensure_symbols_nerd_font() -> None:
+    dests = [
+        Path.home() / ".local/share/fonts/SymbolsNerdFont-Regular.ttf",
+        Path("/usr/local/share/fonts/truetype/nerd-fonts/SymbolsNerdFont-Regular.ttf"),
+        Path("/usr/share/fonts/truetype/nerd-fonts/SymbolsNerdFont-Regular.ttf"),
+    ]
+    if any(p.is_file() for p in dests):
+        return
+    for src in dests[1:]:
+        if src.is_file():
+            dest = dests[0]
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest)
+                subprocess.run(
+                    ["fc-cache", "-f", str(dest.parent)],
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                pass
+            return
+
+
+def _apply_hyprbars_button_keywords(
+    bar_rgb: str, text_rgb: str, chrome: WindowChrome
+) -> None:
+    path = _hyprland_conf_path()
+    if path is not None and path.is_file():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        any_btn = False
+        for line in text.splitlines():
+            trimmed = line.lstrip()
+            if trimmed.startswith("hyprbars-button"):
+                value = trimmed.split("=", 1)[-1].strip() if "=" in trimmed else ""
+                if value:
+                    _hyprctl_keyword("plugin:hyprbars:hyprbars-button", value)
+                    any_btn = True
+        if any_btn:
+            return
+    size = str(chrome.button_size)
+    for icon, action in (
+        (chrome.close, "hyprctl dispatch killactive"),
+        (chrome.maximize, "hyprctl dispatch fullscreen 1"),
+        (chrome.minimize, "hyprctl dispatch movetoworkspacesilent special:minimized"),
+    ):
+        _hyprctl_keyword(
+            "plugin:hyprbars:hyprbars-button",
+            f"{bar_rgb}, {size}, {icon}, {action}, {text_rgb}",
+        )
 
 
 def _hyprland_conf_path() -> Optional[Path]:
@@ -816,20 +983,59 @@ def _replace_hypr_assign(text: str, key: str, value: str) -> str:
     return "".join(out)
 
 
-def _rewrite_hyprbars_buttons(text: str, bar_rgb: str, text_rgb: str) -> str:
+def _hypr_key_present(text: str, key: str) -> bool:
+    key_eq = f"{key} ="
+    key_eq2 = f"{key}="
+    return any(
+        line.lstrip().startswith(key_eq) or line.lstrip().startswith(key_eq2)
+        for line in text.splitlines()
+    )
+
+
+def _replace_or_insert_hypr_assign(text: str, key: str, value: str, after_key: str) -> str:
+    if _hypr_key_present(text, key):
+        return _replace_hypr_assign(text, key, value)
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    after = f"{after_key} ="
+    after2 = f"{after_key}="
+    inserted = False
+    for line in lines:
+        out.append(line)
+        if inserted:
+            continue
+        bare = line.rstrip("\r\n")
+        trimmed = bare.lstrip()
+        indent = bare[: len(bare) - len(trimmed)]
+        if trimmed.startswith(after) or trimmed.startswith(after2):
+            nl = line[len(bare) :] or "\n"
+            out.append(f"{indent}{key} = {value}{nl}")
+            inserted = True
+    if not inserted:
+        out.append(f"{key} = {value}\n")
+    return "".join(out)
+
+
+def _rewrite_hyprbars_buttons(
+    text: str, bar_rgb: str, text_rgb: str, chrome: WindowChrome
+) -> str:
     lines = text.splitlines(keepends=True)
     out: list[str] = []
     for line in lines:
         bare = line.rstrip("\r\n")
         nl = line[len(bare) :]
         if bare.lstrip().startswith("hyprbars-button"):
-            out.append(_rewrite_one_hyprbars_button(bare, bar_rgb, text_rgb) + (nl or "\n"))
+            out.append(
+                _rewrite_one_hyprbars_button(bare, bar_rgb, text_rgb, chrome) + (nl or "\n")
+            )
         else:
             out.append(line)
     return "".join(out)
 
 
-def _rewrite_one_hyprbars_button(line: str, bar_rgb: str, text_rgb: str) -> str:
+def _rewrite_one_hyprbars_button(
+    line: str, bar_rgb: str, text_rgb: str, chrome: WindowChrome
+) -> str:
     indent = line[: len(line) - len(line.lstrip())]
     trimmed = line.lstrip()
     if "=" not in trimmed:
@@ -838,12 +1044,18 @@ def _rewrite_one_hyprbars_button(line: str, bar_rgb: str, text_rgb: str) -> str:
     commas = [i for i, c in enumerate(rest) if c == ","]
     if len(commas) < 3:
         return line
-    size = rest[commas[0] + 1 : commas[1]].strip()
-    icon = rest[commas[1] + 1 : commas[2]].strip()
     after_icon = rest[commas[2] + 1 :].strip()
     lower = after_icon.lower()
     idx = max(lower.rfind(", rgb("), lower.rfind(",rgba("), lower.rfind(",rgb("))
     action = after_icon[:idx].strip() if idx >= 0 else after_icon
+    act = action.lower()
+    if "killactive" in act:
+        icon = chrome.close
+    elif "fullscreen" in act:
+        icon = chrome.maximize
+    else:
+        icon = chrome.minimize
+    size = str(chrome.button_size)
     return f"{indent}hyprbars-button = {bar_rgb}, {size}, {icon}, {action}, {text_rgb}"
 
 
@@ -884,6 +1096,127 @@ def _hyprctl_keyword(key: str, value: str) -> None:
         pass
 
 
+def _hyprctl_dispatch(name: str, args: str) -> None:
+    if not shutil.which("hyprctl"):
+        return
+    try:
+        subprocess.run(
+            ["hyprctl", "dispatch", name, args],
+            env=_hypr_env(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+
+def _hyprnine_active() -> bool:
+    if not shutil.which("hyprctl"):
+        return False
+    try:
+        out = subprocess.run(
+            ["hyprctl", "plugin", "list"],
+            env=_hypr_env(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+            text=True,
+        )
+    except Exception:
+        return False
+    return "plugin hyprnine" in (out.stdout or "").lower()
+
+
+def _ensure_hyprnine_loaded() -> bool:
+    if _hyprnine_active():
+        return True
+    for so in (
+        "/usr/local/lib/hyprland/plugins/libhyprnine.so",
+        "/usr/lib/x86_64-linux-gnu/hyprland/plugins/libhyprnine.so",
+    ):
+        if not Path(so).is_file():
+            continue
+        try:
+            subprocess.run(
+                ["hyprctl", "plugin", "load", so],
+                env=_hypr_env(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=8,
+            )
+        except Exception:
+            continue
+        if _hyprnine_active():
+            return True
+    return False
+
+
+def _active_ninepatch_path() -> Path:
+    return _THEME_DIR / "chrome" / "border-9.png"
+
+
+def _sync_hypr_ninepatch(chrome: WindowChrome) -> None:
+    dest = _active_ninepatch_path()
+    src = None
+    if chrome.ninepatch:
+        candidate = Path(chrome.ninepatch).expanduser()
+        if candidate.is_file():
+            src = candidate
+    if src is not None:
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+            alt = Path.home() / "configs" / "gtk-apps" / "chrome" / "border-9.png"
+            if alt != dest:
+                alt.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, alt)
+        except OSError:
+            return
+        if _theme_session_safe():
+            return
+        if not _ensure_hyprnine_loaded():
+            return
+        _hyprctl_dispatch("hyprninepatch", str(dest))
+        _hyprctl_keyword("general:border_size", "0")
+        return
+    try:
+        dest.unlink(missing_ok=True)
+        (Path.home() / "configs" / "gtk-apps" / "chrome" / "border-9.png").unlink(
+            missing_ok=True
+        )
+    except OSError:
+        pass
+    if _theme_session_safe():
+        return
+    if _hyprnine_active():
+        _hyprctl_dispatch("hyprninepatch", "off")
+
+
+def _hyprctl_hyprbarsgradient(args: str) -> None:
+    if not shutil.which("hyprctl"):
+        return
+    try:
+        subprocess.run(
+            ["hyprctl", "hyprbarsfill", args],
+            env=_hypr_env(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+    except Exception:
+        pass
+    _hyprctl_dispatch("hyprbarsgradient", args)
+
+
 def _theme_session_safe() -> bool:
     """True during Hyprland session bring-up — avoid reload / process thrash."""
     return bool(os.environ.get("NEURONIX_THEME_NO_HYPR_RELOAD"))
@@ -919,14 +1252,17 @@ def sync_shell_chrome(profile: Optional[Profile] = None) -> bool:
     surface = profile.surface_hex()
     accent = profile.accent()
     i0, i1 = profile.border_inactive_stops()
+    chrome = profile.chrome
     _sync_waybar_style(bg, fg, border, surface, i0, i1)
     _sync_mako_colors(bg, fg, border, surface)
     # Fuzzel chrome matches window inactive border + Hypr rounding.
-    _sync_fuzzel_colors(bg, fg, i0, surface, accent)
+    _sync_fuzzel_colors(bg, fg, i0, surface, accent, chrome.border_size, chrome.rounding)
     active = profile.hypr_active_border()
     inactive = profile.hypr_inactive_border()
     if active and inactive:
         _sync_hypr_window_borders(active, inactive, profile.border_hex())
+    _sync_hypr_window_geometry(chrome.border_size, chrome.rounding)
+    _sync_hypr_ninepatch(chrome)
     _sync_hypr_workspace_background(bg)
     _sync_gtk_term_colors(profile)
     _sync_gtk_user_css(profile)
@@ -2225,7 +2561,15 @@ def _bare_rgba(hex_color: str, alpha: str = "ff") -> str:
     return h
 
 
-def _sync_fuzzel_colors(bg: str, fg: str, border: str, surface: str, accent: str) -> None:
+def _sync_fuzzel_colors(
+    bg: str,
+    fg: str,
+    border: str,
+    surface: str,
+    accent: str,
+    border_size: int = 10,
+    rounding: int = 8,
+) -> None:
     path = _first_existing_config("fuzzel/fuzzel.ini")
     if path is None:
         return
@@ -2241,9 +2585,8 @@ def _sync_fuzzel_colors(bg: str, fg: str, border: str, surface: str, accent: str
     out = _replace_ini_assign(out, "selection-text", _bare_rgba(fg))
     out = _replace_ini_assign(out, "match", _bare_rgba(accent))
     out = _replace_ini_assign(out, "selection-match", _bare_rgba(accent))
-    # Match Hyprland window border_size / rounding.
-    out = _replace_ini_section_assign(out, "border", "width", "10")
-    out = _replace_ini_section_assign(out, "border", "radius", "8")
+    out = _replace_ini_section_assign(out, "border", "width", str(border_size))
+    out = _replace_ini_section_assign(out, "border", "radius", str(rounding))
     if out != original:
         try:
             path.write_text(out, encoding="utf-8")
@@ -2258,12 +2601,25 @@ def _hex_to_hypr_rgba(hex_color: str, alpha: str) -> Optional[str]:
     return f"rgba({h.lower()}{alpha})"
 
 
-def _hypr_gradient(a: str, b: str) -> Optional[str]:
-    aa = _hex_to_hypr_rgba(a, "ff")
-    bb = _hex_to_hypr_rgba(b, "ff")
+def _hypr_gradient(a: str, b: str, direction: str = "ltr") -> Optional[str]:
+    left, right = (b, a) if direction == "rtl" else (a, b)
+    aa = _hex_to_hypr_rgba(left, "ff")
+    bb = _hex_to_hypr_rgba(right, "ff")
     if not aa or not bb:
         return None
-    return f"{aa} {bb} 45deg"
+    return f"{aa} {bb} 0deg"
+
+
+def _chrome_bar_stops(chrome: WindowChrome, bar_hex: str, text_hex: str) -> tuple[str, str]:
+    if chrome.bar:
+        return chrome.bar
+    return (bar_hex, _mix_hex(bar_hex, text_hex, 0.22))
+
+
+def _chrome_bar_inactive_stops(chrome: WindowChrome, bar_hex: str) -> tuple[str, str]:
+    if chrome.bar_inactive:
+        return chrome.bar_inactive
+    return (bar_hex, _mix_hex(bar_hex, "#000000", 0.18))
 
 
 def _sync_hypr_window_borders(active: str, inactive: str, panel_hex: str) -> None:
@@ -2287,6 +2643,46 @@ def _sync_hypr_window_borders(active: str, inactive: str, panel_hex: str) -> Non
     if not _theme_session_safe():
         _hyprctl_keyword("general:col.active_border", active)
         _hyprctl_keyword("general:col.inactive_border", inactive)
+
+
+def _sync_hypr_window_geometry(border_size: int, rounding: int) -> None:
+    size = str(border_size)
+    round_s = str(rounding)
+    for path in _hypr_conf_paths():
+        try:
+            original = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        out = original
+        out = _replace_hypr_assign(out, "border_size", size)
+        out = _replace_hypr_assign(out, "rounding", round_s)
+        if out != original:
+            try:
+                path.write_text(out, encoding="utf-8")
+            except OSError:
+                pass
+    if not _theme_session_safe():
+        _hyprctl_keyword("general:border_size", size)
+        _hyprctl_keyword("decoration:rounding", round_s)
+
+
+def install_chrome_ninepatch(profile_id: str, src: str | Path) -> Optional[Path]:
+    """Copy a 9-slice PNG into ``~/.config/gtk-apps/chrome/<id>/border-9.png``.
+
+    Apply-to-suite loads this file in the hyprnine compositor plugin.
+    """
+    ident = (profile_id or "").strip()
+    src_path = Path(src)
+    if not ident or not src_path.is_file():
+        return None
+    dest_dir = _THEME_DIR / "chrome" / ident
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / "border-9.png"
+        shutil.copy2(src_path, dest)
+        return dest
+    except OSError:
+        return None
 
 
 # ---------------------------------------------------------------------------

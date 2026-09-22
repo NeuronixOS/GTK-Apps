@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use gtk4 as gtk;
 use gtk::gdk;
-use gtk::gdk_pixbuf::{InterpType, Pixbuf, PixbufRotation};
+use gtk::gdk_pixbuf::{Pixbuf, PixbufRotation};
 use gtk::glib;
 use gtk::prelude::*;
 
@@ -30,6 +30,7 @@ pub struct ImageView {
     zoom_max: f64,
     zoom_step: f64,
     status: gtk::Label,
+    panning: Rc<Cell<bool>>,
 }
 
 impl ImageView {
@@ -48,6 +49,7 @@ impl ImageView {
             .vexpand(true)
             .hscrollbar_policy(gtk::PolicyType::Automatic)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .kinetic_scrolling(false)
             .child(&picture)
             .build();
         root.add_css_class("image-scroller");
@@ -71,6 +73,7 @@ impl ImageView {
             zoom_max,
             zoom_step,
             status,
+            panning: Rc::new(Cell::new(false)),
         };
 
         view.connect_best_fit_tracking();
@@ -181,6 +184,8 @@ impl ImageView {
         self.picture.set_can_shrink(true);
         self.picture.set_hexpand(true);
         self.picture.set_vexpand(true);
+        self.picture.set_halign(gtk::Align::Center);
+        self.picture.set_valign(gtk::Align::Center);
         self.picture.set_content_fit(gtk::ContentFit::Contain);
         self.picture.set_paintable(Some(&gdk::Texture::for_pixbuf(pb)));
 
@@ -196,25 +201,29 @@ impl ImageView {
         };
 
         let zoom = zoom.clamp(self.zoom_min, self.zoom_max);
+        // Keep the widget on-screen-sized. Scaling the full pixbuf to zoom
+        // (old path) allocated width*height*zoom² bytes and froze the UI.
+        let max_edge = 8192.0;
+        let max_z = (max_edge / (pb.width().max(1) as f64))
+            .min(max_edge / (pb.height().max(1) as f64))
+            .max(self.zoom_min);
+        let zoom = zoom.min(max_z);
         self.zoom.set(zoom);
         self.mode.set(ZoomMode::Free);
 
         let w = ((pb.width() as f64) * zoom).round().max(1.0) as i32;
         let h = ((pb.height() as f64) * zoom).round().max(1.0) as i32;
 
-        let display = if (zoom - 1.0).abs() < 0.001 {
-            pb.clone()
-        } else {
-            pb.scale_simple(w, h, InterpType::Bilinear)
-                .unwrap_or_else(|| pb.clone())
-        };
-
+        // Start alignment: Center inside a ScrolledWindow reflows as you pan
+        // and makes middle-drag snag/flicker.
         self.picture.set_can_shrink(false);
         self.picture.set_hexpand(false);
         self.picture.set_vexpand(false);
+        self.picture.set_halign(gtk::Align::Start);
+        self.picture.set_valign(gtk::Align::Start);
         self.picture.set_content_fit(gtk::ContentFit::Fill);
         self.picture.set_size_request(w, h);
-        self.picture.set_paintable(Some(&gdk::Texture::for_pixbuf(&display)));
+        self.picture.set_paintable(Some(&gdk::Texture::for_pixbuf(pb)));
         self.update_status(pb);
     }
 
@@ -293,8 +302,9 @@ impl ImageView {
             gtk::EventControllerScrollFlags::VERTICAL | gtk::EventControllerScrollFlags::DISCRETE,
         );
         let view = self.clone();
+        let panning = Rc::clone(&self.panning);
         controller.connect_scroll(move |_controller, _dx, dy| {
-            if !view.has_image() {
+            if panning.get() || !view.has_image() {
                 return glib::Propagation::Proceed;
             }
             if dy < 0.0 {
@@ -308,33 +318,58 @@ impl ImageView {
     }
 
     fn connect_drag_pan(&self) {
-        // Middle-button pan so left-click can always drag the file out.
-        let gesture = gtk::GestureDrag::new();
-        gesture.set_button(2);
-        let hadj = self.root.hadjustment();
-        let vadj = self.root.vadjustment();
-        let start_h = Rc::new(Cell::new(0.0));
-        let start_v = Rc::new(Cell::new(0.0));
+        // Pan in the scroller's stable coordinates. GestureDrag on the Picture
+        // used widget space that moved as we scrolled, so the image snagged.
+        let click = gtk::GestureClick::new();
+        click.set_button(2);
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+
+        let panning = Rc::clone(&self.panning);
+        let last = Rc::new(Cell::new((0.0, 0.0)));
+        let root = self.root.clone();
 
         {
-            let hadj = hadj.clone();
-            let vadj = vadj.clone();
-            let start_h = Rc::clone(&start_h);
-            let start_v = Rc::clone(&start_v);
-            gesture.connect_drag_begin(move |_, _, _| {
-                start_h.set(hadj.value());
-                start_v.set(vadj.value());
+            let panning = Rc::clone(&panning);
+            let last = Rc::clone(&last);
+            let root = root.clone();
+            click.connect_pressed(move |gesture, _n, x, y| {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                panning.set(true);
+                last.set((x, y));
+                root.set_cursor_from_name(Some("grabbing"));
             });
         }
         {
-            gesture.connect_drag_update(move |gesture, _, _| {
-                let Some((dx, dy)) = gesture.offset() else {
-                    return;
-                };
-                hadj.set_value(start_h.get() - dx);
-                vadj.set_value(start_v.get() - dy);
+            let panning = Rc::clone(&panning);
+            let root = root.clone();
+            click.connect_released(move |_, _n, _x, _y| {
+                panning.set(false);
+                root.set_cursor_from_name(None);
             });
         }
-        self.picture.add_controller(gesture);
+        {
+            let panning = Rc::clone(&panning);
+            let root = root.clone();
+            click.connect_cancel(move |_, _| {
+                panning.set(false);
+                root.set_cursor_from_name(None);
+            });
+        }
+        self.root.add_controller(click);
+
+        let motion = gtk::EventControllerMotion::new();
+        motion.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let hadj = self.root.hadjustment();
+        let vadj = self.root.vadjustment();
+        motion.connect_motion(move |_, x, y| {
+            if !panning.get() {
+                return;
+            }
+            let (lx, ly) = last.get();
+            last.set((x, y));
+            hadj.set_value(hadj.value() - (x - lx));
+            vadj.set_value(vadj.value() - (y - ly));
+        });
+        self.root.add_controller(motion);
     }
 }

@@ -19,7 +19,7 @@ pub use neuron_daemon::ensure_neuron_daemon;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -103,12 +103,20 @@ impl Profile {
 
     pub fn hypr_active_border(&self) -> Option<String> {
         let [a, b] = self.border_active_stops();
-        hypr_gradient(&a, &b)
+        hypr_gradient(&a, &b, self.window_chrome().gradient)
     }
 
     pub fn hypr_inactive_border(&self) -> Option<String> {
         let [a, b] = self.border_inactive_stops();
-        hypr_gradient(&a, &b)
+        hypr_gradient(&a, &b, self.window_chrome().gradient)
+    }
+
+    /// Thickness / rounding / hyprbars glyphs. Built-ins use stock defaults;
+    /// custom profiles may override via `chrome` in custom-profiles.json.
+    pub fn window_chrome(&self) -> WindowChrome {
+        custom_profile_data(self.id)
+            .map(|d| d.chrome_or_default())
+            .unwrap_or_default()
     }
 
     /// Suite accent — ANSI blue slot (palette[4]). Drives Adwaita
@@ -136,6 +144,232 @@ pub struct ProfileData {
     /// Unfocused window outline — two `#rrggbb` stops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border_inactive: Option<Vec<String>>,
+    /// Thickness, rounding, hyprbars − □ × glyphs, optional 9-patch PNG.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chrome: Option<WindowChrome>,
+}
+
+/// Hyprbars glyph kits: (id, menu label, minimize, maximize, close).
+pub const BUTTON_KITS: &[(&str, &str, &str, &str, &str)] = &[
+    ("gnome", "GNOME − □ ×", "−", "□", "×"),
+    ("macos", "macOS ● ● ●", "●", "●", "●"),
+    ("nerd", "Nerd 󰖰 󰖯 󰖭", "󰖰", "󰖯", "󰖭"),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ChromeBevel {
+    #[default]
+    Flat,
+    Inner,
+    Double,
+}
+
+impl ChromeBevel {
+    pub fn as_id(self) -> &'static str {
+        match self {
+            Self::Flat => "flat",
+            Self::Inner => "inner",
+            Self::Double => "double",
+        }
+    }
+
+    pub fn from_id(s: &str) -> Self {
+        match s {
+            "inner" => Self::Inner,
+            "double" => Self::Double,
+            _ => Self::Flat,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Flat => "Flat",
+            Self::Inner => "Inner highlight",
+            Self::Double => "Double ring",
+        }
+    }
+}
+
+/// Horizontal two-stop gradient for Hyprland outlines and hyprbars.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ChromeGradient {
+    #[default]
+    Ltr,
+    Rtl,
+}
+
+impl ChromeGradient {
+    pub fn as_id(self) -> &'static str {
+        match self {
+            Self::Ltr => "ltr",
+            Self::Rtl => "rtl",
+        }
+    }
+
+    pub fn from_id(s: &str) -> Self {
+        match s {
+            "rtl" | "right_left" | "right-to-left" => Self::Rtl,
+            _ => Self::Ltr,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ltr => "Left → Right",
+            Self::Rtl => "Right → Left",
+        }
+    }
+
+    pub fn is_rtl(self) -> bool {
+        matches!(self, Self::Rtl)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChromeButtons {
+    #[serde(default = "default_button_size")]
+    pub size: u32,
+    #[serde(default = "default_button_kit")]
+    pub kit: String,
+    #[serde(default = "default_minimize")]
+    pub minimize: String,
+    #[serde(default = "default_maximize")]
+    pub maximize: String,
+    #[serde(default = "default_close")]
+    pub close: String,
+}
+
+fn default_button_size() -> u32 {
+    18
+}
+fn default_button_kit() -> String {
+    "gnome".to_string()
+}
+fn default_minimize() -> String {
+    "−".to_string()
+}
+fn default_maximize() -> String {
+    "□".to_string()
+}
+fn default_close() -> String {
+    "×".to_string()
+}
+
+impl Default for ChromeButtons {
+    fn default() -> Self {
+        Self {
+            size: default_button_size(),
+            kit: default_button_kit(),
+            minimize: default_minimize(),
+            maximize: default_maximize(),
+            close: default_close(),
+        }
+    }
+}
+
+impl ChromeButtons {
+    pub fn apply_kit(&mut self, kit: &str) {
+        let (_, _, min, max, close) = BUTTON_KITS
+            .iter()
+            .copied()
+            .find(|(id, _, _, _, _)| *id == kit)
+            .unwrap_or(BUTTON_KITS[0]);
+        self.kit = kit.to_string();
+        self.minimize = min.to_string();
+        self.maximize = max.to_string();
+        self.close = close.to_string();
+    }
+
+    fn glyph_for_action(&self, action: &str) -> &str {
+        let lower = action.to_ascii_lowercase();
+        if lower.contains("killactive") {
+            &self.close
+        } else if lower.contains("fullscreen") {
+            &self.maximize
+        } else {
+            &self.minimize
+        }
+    }
+}
+
+/// Window outline geometry + titlebar buttons stored on a suite profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowChrome {
+    #[serde(default = "default_border_size")]
+    pub border_size: u32,
+    #[serde(default = "default_rounding")]
+    pub rounding: u32,
+    #[serde(default)]
+    pub bevel: ChromeBevel,
+    /// Left→right or right→left — used for `col.active_border` / inactive and hyprbars.
+    #[serde(default)]
+    pub gradient: ChromeGradient,
+    /// Hyprbars focused title-bar fill — two `#rrggbb` stops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bar: Option<Vec<String>>,
+    /// Hyprbars unfocused title-bar fill — two `#rrggbb` stops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bar_inactive: Option<Vec<String>>,
+    #[serde(default)]
+    pub buttons: ChromeButtons,
+    /// PNG 9-slice painted on real windows by the hyprnine compositor plugin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ninepatch: Option<String>,
+}
+
+fn default_border_size() -> u32 {
+    10
+}
+fn default_rounding() -> u32 {
+    8
+}
+
+impl Default for WindowChrome {
+    fn default() -> Self {
+        Self {
+            border_size: default_border_size(),
+            rounding: default_rounding(),
+            bevel: ChromeBevel::Flat,
+            gradient: ChromeGradient::Ltr,
+            bar: None,
+            bar_inactive: None,
+            buttons: ChromeButtons::default(),
+            ninepatch: None,
+        }
+    }
+}
+
+impl WindowChrome {
+    pub fn clamp(&mut self) {
+        self.border_size = self.border_size.clamp(1, 32);
+        self.rounding = self.rounding.min(48);
+        self.buttons.size = self.buttons.size.clamp(10, 36);
+        if self.buttons.minimize.trim().is_empty() {
+            self.buttons.minimize = default_minimize();
+        }
+        if self.buttons.maximize.trim().is_empty() {
+            self.buttons.maximize = default_maximize();
+        }
+        if self.buttons.close.trim().is_empty() {
+            self.buttons.close = default_close();
+        }
+    }
+
+    /// Title-bar gradient stops, falling back to elevated surface → mix toward fg.
+    pub fn bar_stops(&self, surface: &str, fg: &str) -> [String; 2] {
+        let a = ProfileData::valid_hex(surface).unwrap_or_else(|| surface.to_string());
+        let b = mix_hex(&a, fg, 0.22);
+        ProfileData::pair_from(self.bar.as_ref(), [a, b])
+    }
+
+    /// Unfocused title-bar stops, falling back to a darker mix toward the background.
+    pub fn bar_inactive_stops(&self, surface: &str, bg: &str) -> [String; 2] {
+        let a = ProfileData::valid_hex(surface).unwrap_or_else(|| surface.to_string());
+        let b = mix_hex(&a, bg, 0.40);
+        ProfileData::pair_from(self.bar_inactive.as_ref(), [a, b])
+    }
 }
 
 impl ProfileData {
@@ -150,6 +384,7 @@ impl ProfileData {
             border: Some(p.border_hex()),
             border_active: Some(p.border_active_stops().to_vec()),
             border_inactive: Some(p.border_inactive_stops().to_vec()),
+            chrome: Some(p.window_chrome()),
         }
     }
 
@@ -167,6 +402,31 @@ impl ProfileData {
         self.border_active = Some(active.to_vec());
         self.border_inactive = Some(inactive.to_vec());
         self.border = Some(active[0].clone());
+        self.seed_chrome();
+    }
+
+    pub fn seed_chrome(&mut self) {
+        let mut chrome = self.chrome.clone().unwrap_or_default();
+        chrome.clamp();
+        if chrome.bar.is_none() {
+            let surface = mix_hex(&self.background, &self.foreground, 0.10);
+            chrome.bar = Some(chrome.bar_stops(&surface, &self.foreground).to_vec());
+        }
+        if chrome.bar_inactive.is_none() {
+            let surface = mix_hex(&self.background, &self.foreground, 0.08);
+            chrome.bar_inactive = Some(chrome.bar_inactive_stops(&surface, &self.background).to_vec());
+        }
+        self.chrome = Some(chrome);
+    }
+
+    pub fn chrome_or_default(&self) -> WindowChrome {
+        let mut chrome = self.chrome.clone().unwrap_or_default();
+        chrome.clamp();
+        chrome
+    }
+
+    pub fn chrome_mut(&mut self) -> &mut WindowChrome {
+        self.chrome.get_or_insert_with(WindowChrome::default)
     }
 
     fn valid_hex(s: &str) -> Option<String> {
@@ -239,18 +499,34 @@ impl ProfileData {
         self.border_inactive = Some(pair.to_vec());
     }
 
+    pub fn set_bar_stop(&mut self, i: usize, hex: String) {
+        let surface = mix_hex(&self.background, &self.foreground, 0.10);
+        let mut pair = self.chrome_or_default().bar_stops(&surface, &self.foreground);
+        pair[i.min(1)] = hex;
+        self.chrome_mut().bar = Some(pair.to_vec());
+    }
+
+    pub fn set_bar_inactive_stop(&mut self, i: usize, hex: String) {
+        let surface = mix_hex(&self.background, &self.foreground, 0.08);
+        let mut pair = self
+            .chrome_or_default()
+            .bar_inactive_stops(&surface, &self.background);
+        pair[i.min(1)] = hex;
+        self.chrome_mut().bar_inactive = Some(pair.to_vec());
+    }
+
     pub fn hypr_active_border(&self) -> Option<String> {
         let [a, b] = self
             .active_border_stops()
             .unwrap_or_else(|| [self.border_hex(), self.border_hex()]);
-        hypr_gradient(&a, &b)
+        hypr_gradient(&a, &b, self.chrome_or_default().gradient)
     }
 
     pub fn hypr_inactive_border(&self) -> Option<String> {
         let a = mix_hex(&self.background, &self.foreground, 0.10);
         let b = mix_hex(&a, &self.background, 0.40);
         let [c0, c1] = self.inactive_border_stops().unwrap_or([a, b]);
-        hypr_gradient(&c0, &c1)
+        hypr_gradient(&c0, &c1, self.chrome_or_default().gradient)
     }
 
     /// Suite accent — palette slot 4 (Blue / `--accent-blue`).
@@ -1849,44 +2125,155 @@ pub fn profile_id_at(ids: &[&'static str], selected: u32) -> Option<&'static str
 /// push live via `hyprctl keyword`. No-op outside Hyprland.
 /// Does not `hyprctl reload` — that re-runs monitor= and rearranges displays.
 pub fn sync_hyprbars(profile: &Profile) {
-    let _ = sync_hyprbars_colors(&profile.surface_hex(), profile.foreground);
+    let chrome = profile.window_chrome();
+    let _ = sync_hyprbars_chrome(&profile.surface_hex(), profile.foreground, &chrome);
 }
 
 /// Same as [`sync_hyprbars`] for arbitrary hex colors (`#rrggbb`).
 pub fn sync_hyprbars_colors(bar_hex: &str, text_hex: &str) -> bool {
-    let Some(bar_rgb) = hex_to_hypr_rgb(bar_hex) else {
+    sync_hyprbars_chrome(bar_hex, text_hex, &WindowChrome::default())
+}
+
+fn sync_hyprbars_chrome(bar_hex: &str, text_hex: &str, chrome: &WindowChrome) -> bool {
+    let [bar0, bar1] = chrome.bar_stops(bar_hex, text_hex);
+    let [ibar0, ibar1] = chrome.bar_inactive_stops(bar_hex, bar_hex);
+    let Some(bar_rgb) = hex_to_hypr_rgb(&bar0) else {
+        return false;
+    };
+    let Some(bar2_rgb) = hex_to_hypr_rgb(&bar1) else {
+        return false;
+    };
+    let Some(ibar_rgb) = hex_to_hypr_rgb(&ibar0) else {
+        return false;
+    };
+    let Some(ibar2_rgb) = hex_to_hypr_rgb(&ibar1) else {
         return false;
     };
     let Some(text_rgb) = hex_to_hypr_rgb(text_hex) else {
         return false;
     };
-    let bar_rgba = format!("rgba({}ff)", &bar_rgb[4..10]); // rgb(RRGGBB) → rgba(RRGGBBff)
+    let bar_rgba = format!("rgba({}ff)", &bar_rgb[4..10]);
+    let bar2_rgba = format!("rgba({}ff)", &bar2_rgb[4..10]);
+    let ibar_rgba = format!("rgba({}ff)", &ibar_rgb[4..10]);
+    let ibar2_rgba = format!("rgba({}ff)", &ibar2_rgb[4..10]);
+    let dir = chrome.gradient.as_id();
+    let btn_size = chrome.buttons.size.to_string();
+    let font = chrome_bar_font(chrome);
+    if chrome.buttons.kit == "nerd" {
+        ensure_symbols_nerd_font();
+    }
 
     // 1) Persist so the next login / reload keeps the colors.
     if let Some(path) = hyprland_conf_path() {
         if let Ok(original) = std::fs::read_to_string(&path) {
             let mut out = original.clone();
             out = replace_hypr_assign(&out, "bar_color", &bar_rgba);
+            out = replace_or_insert_hypr_assign(&out, "bar_color2", &bar2_rgba, "bar_color");
+            out = replace_or_insert_hypr_assign(&out, "bar_color_inactive", &ibar_rgba, "bar_color2");
+            out = replace_or_insert_hypr_assign(&out, "bar_color_inactive2", &ibar2_rgba, "bar_color_inactive");
+            out = replace_or_insert_hypr_assign(&out, "bar_gradient", dir, "bar_color_inactive2");
             out = replace_hypr_assign(&out, "col.text", &text_rgb);
-            out = replace_hypr_assign(&out, "inactive_button_color", &bar_rgb);
-            out = rewrite_hyprbars_buttons(&out, &bar_rgb, &text_rgb);
+            out = replace_hypr_assign(&out, "inactive_button_color", &ibar_rgb);
+            out = replace_hypr_assign(&out, "bar_text_font", font);
+            out = rewrite_hyprbars_buttons(&out, &bar_rgb, &text_rgb, &btn_size, &chrome.buttons);
             if out != original {
                 let _ = std::fs::write(&path, out);
             }
         }
     }
 
-    // 2) Live update (no full compositor restart): keywords take effect immediately
-    //    for bar fill / title / inactive button fill. Skip during session start —
-    //    writing hyprland.conf is enough; hyprctl races plugin bring-up.
+    // 2) Live update (no full compositor restart). Neuronix hyprbars replaces
+    //    hyprbars-button rows that share the same action, so keywords are safe.
+    //    Title-bar gradient uses a dispatcher because new plugin: keys are not
+    //    keyword-addressable until a config reload (which we must not do).
     if !theme_session_safe() {
         hyprctl_keyword("plugin:hyprbars:bar_color", &bar_rgba);
         hyprctl_keyword("plugin:hyprbars:col.text", &text_rgb);
-        hyprctl_keyword("plugin:hyprbars:inactive_button_color", &bar_rgb);
-        // Do not hyprctl reload: that re-runs monitor= (including preferred,auto)
-        // and rearranges displays. − □ × colours persist in conf for next login.
+        hyprctl_keyword("plugin:hyprbars:inactive_button_color", &ibar_rgb);
+        hyprctl_keyword("plugin:hyprbars:bar_text_font", font);
+        apply_hyprbars_fill(&bar_rgba, &bar2_rgba, &ibar_rgba, &ibar2_rgba, dir);
+        apply_hyprbars_button_keywords(&bar_rgb, &text_rgb, chrome);
     }
     true
+}
+
+fn chrome_bar_font(chrome: &WindowChrome) -> &'static str {
+    if chrome.buttons.kit == "nerd" {
+        "Symbols Nerd Font"
+    } else {
+        "DejaVu Sans"
+    }
+}
+
+fn ensure_symbols_nerd_font() {
+    let dests: Vec<PathBuf> = [
+        dirs::data_local_dir().map(|d| d.join("fonts/SymbolsNerdFont-Regular.ttf")),
+        Some(PathBuf::from(
+            "/usr/local/share/fonts/truetype/nerd-fonts/SymbolsNerdFont-Regular.ttf",
+        )),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if dests.iter().any(|p| p.is_file()) {
+        return;
+    }
+    let srcs = [
+        PathBuf::from("/usr/local/share/fonts/truetype/nerd-fonts/SymbolsNerdFont-Regular.ttf"),
+        PathBuf::from("/usr/share/fonts/truetype/nerd-fonts/SymbolsNerdFont-Regular.ttf"),
+        PathBuf::from("/usr/share/neuronix/fonts/SymbolsNerdFont-Regular.ttf"),
+    ];
+    let Some(src) = srcs.into_iter().find(|p| p.is_file()) else {
+        return;
+    };
+    if let Some(dest) = dirs::data_local_dir().map(|d| d.join("fonts/SymbolsNerdFont-Regular.ttf")) {
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+            if std::fs::copy(&src, &dest).is_ok() {
+                let _ = std::process::Command::new("fc-cache")
+                    .args(["-f", parent.to_string_lossy().as_ref()])
+                    .status();
+            }
+        }
+    }
+}
+
+fn apply_hyprbars_button_keywords(bar_rgb: &str, text_rgb: &str, chrome: &WindowChrome) {
+    if let Some(path) = hyprland_conf_path() {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let mut any = false;
+            for line in text.lines() {
+                let trimmed = line.trim_start();
+                if let Some(rest) = trimmed.strip_prefix("hyprbars-button") {
+                    let value = rest.trim_start().trim_start_matches('=').trim();
+                    if !value.is_empty() {
+                        hyprctl_keyword("plugin:hyprbars:hyprbars-button", value);
+                        any = true;
+                    }
+                }
+            }
+            if any {
+                return;
+            }
+        }
+    }
+    let size = chrome.buttons.size.to_string();
+    for (icon, action) in [
+        (chrome.buttons.close.as_str(), "hyprctl dispatch killactive"),
+        (
+            chrome.buttons.maximize.as_str(),
+            "hyprctl dispatch fullscreen 1",
+        ),
+        (
+            chrome.buttons.minimize.as_str(),
+            "hyprctl dispatch movetoworkspacesilent special:minimized",
+        ),
+    ] {
+        hyprctl_keyword(
+            "plugin:hyprbars:hyprbars-button",
+            &format!("{bar_rgb}, {size}, {icon}, {action}, {text_rgb}"),
+        );
+    }
 }
 
 fn hyprland_conf_path() -> Option<PathBuf> {
@@ -1948,11 +2335,66 @@ fn replace_hypr_assign(text: &str, key: &str, value: &str) -> String {
     out
 }
 
-fn rewrite_hyprbars_buttons(text: &str, bar_rgb: &str, text_rgb: &str) -> String {
+fn hypr_key_present(text: &str, key: &str) -> bool {
+    let prefix = format!("{key} =");
+    let prefix2 = format!("{key}=");
+    text.lines().any(|line| {
+        let t = line.trim_start();
+        t.starts_with(&prefix) || t.starts_with(&prefix2)
+    })
+}
+
+/// Replace `key =` if present; otherwise insert a line immediately after `after_key`.
+fn replace_or_insert_hypr_assign(text: &str, key: &str, value: &str, after_key: &str) -> String {
+    if hypr_key_present(text, key) {
+        return replace_hypr_assign(text, key, value);
+    }
+    let mut out = String::with_capacity(text.len() + 64);
+    let after = format!("{after_key} =");
+    let after2 = format!("{after_key}=");
+    let mut inserted = false;
+    for line in text.lines() {
+        out.push_str(line);
+        out.push('\n');
+        if inserted {
+            continue;
+        }
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(&after) || trimmed.starts_with(&after2) {
+            let indent_len = line.len() - trimmed.len();
+            out.push_str(&line[..indent_len]);
+            out.push_str(key);
+            out.push_str(" = ");
+            out.push_str(value);
+            out.push('\n');
+            inserted = true;
+        }
+    }
+    if !inserted {
+        out.push_str(key);
+        out.push_str(" = ");
+        out.push_str(value);
+        out.push('\n');
+    }
+    if !text.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+fn rewrite_hyprbars_buttons(
+    text: &str,
+    bar_rgb: &str,
+    text_rgb: &str,
+    size: &str,
+    buttons: &ChromeButtons,
+) -> String {
     let mut out = String::with_capacity(text.len() + 32);
     for line in text.lines() {
         if line.trim_start().starts_with("hyprbars-button") {
-            out.push_str(&rewrite_one_hyprbars_button(line, bar_rgb, text_rgb));
+            out.push_str(&rewrite_one_hyprbars_button(
+                line, bar_rgb, text_rgb, size, buttons,
+            ));
             out.push('\n');
         } else {
             out.push_str(line);
@@ -1965,7 +2407,13 @@ fn rewrite_hyprbars_buttons(text: &str, bar_rgb: &str, text_rgb: &str) -> String
     out
 }
 
-fn rewrite_one_hyprbars_button(line: &str, bar_rgb: &str, text_rgb: &str) -> String {
+fn rewrite_one_hyprbars_button(
+    line: &str,
+    bar_rgb: &str,
+    text_rgb: &str,
+    size: &str,
+    buttons: &ChromeButtons,
+) -> String {
     let indent_len = line.len() - line.trim_start().len();
     let indent = &line[..indent_len];
     let trimmed = line.trim_start();
@@ -1980,8 +2428,6 @@ fn rewrite_one_hyprbars_button(line: &str, bar_rgb: &str, text_rgb: &str) -> Str
     if commas.len() < 3 {
         return line.to_string();
     }
-    let size = rest[commas[0] + 1..commas[1]].trim();
-    let icon = rest[commas[1] + 1..commas[2]].trim();
     let after_icon = rest[commas[2] + 1..].trim();
     let action = {
         let lower = after_icon.to_ascii_lowercase();
@@ -1995,6 +2441,7 @@ fn rewrite_one_hyprbars_button(line: &str, bar_rgb: &str, text_rgb: &str) -> Str
             after_icon
         }
     };
+    let icon = buttons.glyph_for_action(action);
     format!("{indent}hyprbars-button = {bar_rgb}, {size}, {icon}, {action}, {text_rgb}")
 }
 
@@ -2033,6 +2480,16 @@ fn hyprctl_keyword(key: &str, value: &str) {
     let _ = hyprctl_quiet(hyprctl_cmd().args(["keyword", key, value])).status();
 }
 
+fn hyprctl_dispatch(name: &str, args: &str) {
+    let _ = hyprctl_quiet(hyprctl_cmd().args(["dispatch", name, args])).status();
+}
+
+fn apply_hyprbars_fill(c1: &str, c2: &str, i1: &str, i2: &str, dir: &str) {
+    let args = format!("{c1} {c2} {i1} {i2} {dir}");
+    let _ = hyprctl_quiet(hyprctl_cmd().args(["hyprbarsfill", &args])).status();
+    hyprctl_dispatch("hyprbarsgradient", &args);
+}
+
 #[allow(dead_code)] // kept for session-start safety comments; theme apply must not reload
 fn hyprctl_reload() {
     // Session start sets this so we never `hyprctl reload` while plugins/portals
@@ -2066,6 +2523,44 @@ pub fn hyprbars_active() -> bool {
         .contains("plugin hyprbars")
 }
 
+/// True when the hyprnine 9-slice plugin is loaded.
+pub fn hyprnine_active() -> bool {
+    if hypr_instance_signature().is_none() {
+        return false;
+    }
+    let Ok(out) = hyprctl_cmd()
+        .args(["plugin", "list"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .to_ascii_lowercase()
+        .contains("plugin hyprnine")
+}
+
+fn ensure_hyprnine_loaded() -> bool {
+    if hyprnine_active() {
+        return true;
+    }
+    for so in [
+        "/usr/local/lib/hyprland/plugins/libhyprnine.so",
+        "/usr/lib/x86_64-linux-gnu/hyprland/plugins/libhyprnine.so",
+    ] {
+        if !Path::new(so).is_file() {
+            continue;
+        }
+        let _ = hyprctl_quiet(hyprctl_cmd().args(["plugin", "load", so])).status();
+        if hyprnine_active() {
+            return true;
+        }
+    }
+    false
+}
+
 /// Prefer hiding GTK headerbar close/min/max when hyprbars owns those controls.
 pub fn headerbar_show_title_buttons() -> bool {
     !hyprbars_active()
@@ -2090,15 +2585,26 @@ pub fn sync_shell_chrome(profile: &Profile) {
     let surface = profile.surface_hex();
     let accent = profile.accent();
     let [inactive0, inactive1] = profile.border_inactive_stops();
+    let chrome = profile.window_chrome();
     sync_waybar_style(bg, fg, &border, &surface, &inactive0, &inactive1);
     sync_mako_colors(bg, fg, &border);
     // Fuzzel chrome matches window inactive border + Hypr rounding.
-    sync_fuzzel_colors(bg, fg, &inactive0, &surface, accent);
+    sync_fuzzel_colors(
+        bg,
+        fg,
+        &inactive0,
+        &surface,
+        accent,
+        chrome.border_size,
+        chrome.rounding,
+    );
     if let (Some(active), Some(inactive)) =
         (profile.hypr_active_border(), profile.hypr_inactive_border())
     {
         sync_hypr_window_borders(&active, &inactive, &profile.border_hex());
     }
+    sync_hypr_window_geometry(chrome.border_size, chrome.rounding);
+    sync_hypr_ninepatch(&chrome);
     sync_hypr_workspace_background(bg);
     sync_gtk_term_colors(profile);
     sync_gtk_user_css(profile);
@@ -2158,6 +2664,99 @@ pub fn preview_window_border(data: &ProfileData) {
     if let (Some(active), Some(inactive)) = (data.hypr_active_border(), data.hypr_inactive_border())
     {
         apply_hypr_window_border_keywords(&active, &inactive);
+    }
+    let chrome = data.chrome_or_default();
+    if !theme_session_safe() {
+        hyprctl_keyword("general:border_size", &chrome.border_size.to_string());
+        hyprctl_keyword("decoration:rounding", &chrome.rounding.to_string());
+        preview_hyprbars_fill(data, &chrome);
+    }
+}
+
+fn preview_hyprbars_fill(data: &ProfileData, chrome: &WindowChrome) {
+    let surface = mix_hex(&data.background, &data.foreground, 0.10);
+    let [b0, b1] = chrome.bar_stops(&surface, &data.foreground);
+    let [i0, i1] = chrome.bar_inactive_stops(&surface, &data.background);
+    let Some(c0) = hex_to_hypr_rgba(&b0, "ff") else {
+        return;
+    };
+    let Some(c1) = hex_to_hypr_rgba(&b1, "ff") else {
+        return;
+    };
+    let Some(ic0) = hex_to_hypr_rgba(&i0, "ff") else {
+        return;
+    };
+    let Some(ic1) = hex_to_hypr_rgba(&i1, "ff") else {
+        return;
+    };
+    hyprctl_keyword("plugin:hyprbars:bar_color", &c0);
+    apply_hyprbars_fill(&c0, &c1, &ic0, &ic1, chrome.gradient.as_id());
+}
+
+/// Copy a 9-slice PNG into `~/.config/gtk-apps/chrome/<id>/border-9.png`.
+/// Apply-to-suite then loads it in the hyprnine compositor plugin.
+pub fn install_chrome_ninepatch(profile_id: &str, src: &Path) -> Option<PathBuf> {
+    let id = profile_id.trim();
+    if id.is_empty() || !src.is_file() {
+        return None;
+    }
+    let dest_dir = theme_dir().join("chrome").join(id);
+    std::fs::create_dir_all(&dest_dir).ok()?;
+    let dest = dest_dir.join("border-9.png");
+    std::fs::copy(src, &dest).ok()?;
+    Some(dest)
+}
+
+fn active_ninepatch_path() -> PathBuf {
+    theme_dir().join("chrome").join("border-9.png")
+}
+
+fn sync_hypr_ninepatch(chrome: &WindowChrome) {
+    let dest = active_ninepatch_path();
+    let src = chrome
+        .ninepatch
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.is_file());
+
+    if let Some(src) = src {
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::copy(&src, &dest);
+        if let Some(home) = dirs::home_dir() {
+            let alt = home.join("configs/gtk-apps/chrome/border-9.png");
+            if alt != dest {
+                if let Some(parent) = alt.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::copy(&src, &alt);
+            }
+        }
+        if theme_session_safe() {
+            return;
+        }
+        if !ensure_hyprnine_loaded() {
+            return;
+        }
+        if let Some(path) = dest.to_str() {
+            hyprctl_dispatch("hyprninepatch", path);
+        }
+        hyprctl_keyword("general:border_size", "0");
+        return;
+    }
+
+    let _ = std::fs::remove_file(&dest);
+    if let Some(home) = dirs::home_dir() {
+        let _ = std::fs::remove_file(home.join("configs/gtk-apps/chrome/border-9.png"));
+    }
+    if theme_session_safe() {
+        return;
+    }
+    if hyprnine_active() {
+        hyprctl_dispatch("hyprninepatch", "off");
     }
 }
 
@@ -2485,7 +3084,15 @@ fn replace_ini_section_assign(text: &str, section: &str, key: &str, value: &str)
     out
 }
 
-fn sync_fuzzel_colors(bg: &str, fg: &str, border: &str, surface: &str, accent: &str) {
+fn sync_fuzzel_colors(
+    bg: &str,
+    fg: &str,
+    border: &str,
+    surface: &str,
+    accent: &str,
+    border_size: u32,
+    rounding: u32,
+) {
     let bare = |h: &str| -> String {
         let t = h.trim_start_matches('#');
         if t.len() == 6 {
@@ -2495,6 +3102,8 @@ fn sync_fuzzel_colors(bg: &str, fg: &str, border: &str, surface: &str, accent: &
         }
     };
     let bg_a = format!("{}f2", bg.trim_start_matches('#'));
+    let width = border_size.to_string();
+    let radius = rounding.to_string();
     for path in existing_config_paths("fuzzel/fuzzel.ini") {
         let Ok(original) = std::fs::read_to_string(&path) else {
             continue;
@@ -2507,9 +3116,8 @@ fn sync_fuzzel_colors(bg: &str, fg: &str, border: &str, surface: &str, accent: &
         out = replace_ini_assign(&out, "selection-text", &bare(fg));
         out = replace_ini_assign(&out, "match", &bare(accent));
         out = replace_ini_assign(&out, "selection-match", &bare(accent));
-        // Match Hyprland window border_size / rounding.
-        out = replace_ini_section_assign(&out, "border", "width", "10");
-        out = replace_ini_section_assign(&out, "border", "radius", "8");
+        out = replace_ini_section_assign(&out, "border", "width", &width);
+        out = replace_ini_section_assign(&out, "border", "radius", &radius);
         if out != original {
             let _ = std::fs::write(&path, out);
         }
@@ -2533,6 +3141,26 @@ fn sync_hypr_window_borders(active: &str, inactive: &str, panel_hex: &str) {
         }
     }
     apply_hypr_window_border_keywords(active, inactive);
+}
+
+fn sync_hypr_window_geometry(border_size: u32, rounding: u32) {
+    let size = border_size.to_string();
+    let round = rounding.to_string();
+    for path in hypr_conf_paths() {
+        let Ok(original) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let mut out = original.clone();
+        out = replace_hypr_assign(&out, "border_size", &size);
+        out = replace_hypr_assign(&out, "rounding", &round);
+        if out != original {
+            let _ = std::fs::write(&path, out);
+        }
+    }
+    if !theme_session_safe() {
+        hyprctl_keyword("general:border_size", &size);
+        hyprctl_keyword("decoration:rounding", &round);
+    }
 }
 
 fn sync_hypr_workspace_background(bg: &str) {
@@ -2635,11 +3263,15 @@ fn hex_to_hypr_rgba(hex: &str, alpha: &str) -> Option<String> {
     Some(format!("rgba({digits}{alpha})"))
 }
 
-/// Hyprland two-stop outline: `rgba(..) rgba(..) 45deg`.
-fn hypr_gradient(a: &str, b: &str) -> Option<String> {
-    let aa = hex_to_hypr_rgba(a, "ff")?;
-    let bb = hex_to_hypr_rgba(b, "ff")?;
-    Some(format!("{aa} {bb} 45deg"))
+/// Hyprland two-stop outline. `0deg` is left→right in the border shader; RTL swaps stops.
+fn hypr_gradient(a: &str, b: &str, dir: ChromeGradient) -> Option<String> {
+    let (left, right) = match dir {
+        ChromeGradient::Ltr => (a, b),
+        ChromeGradient::Rtl => (b, a),
+    };
+    let aa = hex_to_hypr_rgba(left, "ff")?;
+    let bb = hex_to_hypr_rgba(right, "ff")?;
+    Some(format!("{aa} {bb} 0deg"))
 }
 
 const GTK_USER_CSS_BEGIN: &str = "/* BEGIN gtk-theme:shell-chrome */";

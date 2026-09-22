@@ -1,8 +1,9 @@
 //! Main application window: sidebar, toolbar, tabs, actions.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gtk4 as gtk;
 use gtk::gdk;
@@ -54,6 +55,12 @@ pub struct FilesWindow {
     paned: gtk::Paned,
     /// Vertical: file view | bottom tools (terminal / find in files)
     content_paned: gtk::Paned,
+    /// Ctrl+Space: bottom tools are half the files+tools paned.
+    terminal_half: Cell<bool>,
+    /// Height restored by the second Ctrl+Space (config default ~200px).
+    terminal_compact_height: Cell<i32>,
+    /// Ignore a second Ctrl+Space in the same key event (accel + capture).
+    terminal_toggle_at: Cell<Option<Instant>>,
     /// Paths captured when a file-view context menu opens (selection can clear
     /// when the popover steals focus).
     context_paths: RefCell<Option<Vec<PathBuf>>>,
@@ -265,6 +272,9 @@ impl FilesWindow {
             empty_trash_btn: empty_trash_btn.clone(),
             paned: paned.clone(),
             content_paned: content_paned.clone(),
+            terminal_half: Cell::new(false),
+            terminal_compact_height: Cell::new(compact_terminal_height(cfg.window.terminal_height)),
+            terminal_toggle_at: Cell::new(None),
             context_paths: RefCell::new(None),
             sync_header: sync_header.clone(),
             sync_header_icon: sync_header_icon.clone(),
@@ -272,6 +282,25 @@ impl FilesWindow {
         });
         *fw_slot.borrow_mut() = Some(Rc::clone(&fw));
         fw.update_sync_header();
+        {
+            let fw2 = Rc::clone(&fw);
+            fw.terminal.set_on_cwd_from_shell(move |path| {
+                let tab = fw2.current_tab();
+                if tab.is_trash() {
+                    return;
+                }
+                if let Some(cur) = tab.location_path() {
+                    let a = cur.canonicalize().unwrap_or(cur);
+                    let b = path.canonicalize().unwrap_or(path.clone());
+                    if a == b {
+                        return;
+                    }
+                }
+                // Do not call sync_chrome(): that force-feeds `cd` and would
+                // wipe the command the user just typed.
+                tab.navigate_path(&path, true);
+            });
+        }
         {
             let fw2 = Rc::clone(&fw);
             empty_trash_btn.connect_clicked(move |_| {
@@ -454,10 +483,14 @@ impl FilesWindow {
                 c.window.height = w.height();
                 c.window.sidebar_width = fw2.paned.position();
                 c.window.sidebar_visible = true;
-                let total = fw2.content_paned.height();
-                let pos = fw2.content_paned.position();
-                if total > pos + 100 {
-                    c.window.terminal_height = total - pos;
+                if fw2.terminal_half.get() {
+                    c.window.terminal_height = fw2.terminal_compact_height.get();
+                } else {
+                    let total = fw2.content_paned.height();
+                    let pos = fw2.content_paned.position();
+                    if total > pos + 100 {
+                        c.window.terminal_height = total - pos;
+                    }
                 }
                 let tab = fw2.current_tab();
                 c.view.show_hidden = tab.show_hidden();
@@ -854,6 +887,12 @@ impl FilesWindow {
         });
         bind(win, "edit-location", self, |fw, _, _| {
             fw.pathbar.show_entry();
+        });
+        bind(win, "clear-terminal", self, |fw, _, _| {
+            fw.terminal.clear_screen();
+        });
+        bind(win, "terminal-half-height", self, |fw, _, _| {
+            fw.action_terminal_half_height();
         });
         bind(win, "open-folder", self, |fw, _, _| fw.action_open_folder());
         bind(win, "new-terminal", self, |fw, _, _| {
@@ -1586,6 +1625,43 @@ impl FilesWindow {
         }
     }
 
+    /// Ctrl+Space: half-window terminal, then the compact default height again.
+    fn action_terminal_half_height(&self) {
+        let now = Instant::now();
+        if self
+            .terminal_toggle_at
+            .get()
+            .is_some_and(|t| now.duration_since(t) < Duration::from_millis(80))
+        {
+            return;
+        }
+        self.terminal_toggle_at.set(Some(now));
+
+        let paned = &self.content_paned;
+        let total = paned.height();
+        if total < 240 {
+            return;
+        }
+        let current = (total - paned.position()).max(0);
+        let half = total / 2;
+        let already_half = current >= half.saturating_sub(32);
+
+        if self.terminal_half.get() || already_half {
+            let cap = (half - 40).max(120);
+            let compact = self.terminal_compact_height.get().clamp(120, cap);
+            paned.set_position((total - compact).max(160));
+            self.terminal_half.set(false);
+            self.config.borrow_mut().window.terminal_height = compact;
+        } else {
+            if current >= 120 && current < half.saturating_sub(32) {
+                self.terminal_compact_height
+                    .set(compact_terminal_height(current));
+            }
+            paned.set_position(half);
+            self.terminal_half.set(true);
+        }
+    }
+
     fn action_find_in_files(self: &Rc<Self>) {
         let directory = self
             .current_tab()
@@ -1905,6 +1981,28 @@ fn install_clipboard_shortcuts(fw: &Rc<FilesWindow>) {
         let mods = state.intersection(gtk::accelerator_get_default_mod_mask());
         let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
         let shift = mods.contains(gdk::ModifierType::SHIFT_MASK);
+        let is_l = matches!(keyval, gdk::Key::l | gdk::Key::L);
+        if ctrl && !shift && matches!(keyval, gdk::Key::space | gdk::Key::KP_Space) {
+            if focus_is_text_field(&fw_keys) {
+                return glib::Propagation::Proceed;
+            }
+            fw_keys.action_terminal_half_height();
+            return glib::Propagation::Stop;
+        }
+        if ctrl && shift && is_l {
+            fw_keys.pathbar.show_entry();
+            return glib::Propagation::Stop;
+        }
+        if ctrl && !shift && is_l {
+            if focus_is_text_field(&fw_keys) {
+                return glib::Propagation::Proceed;
+            }
+            if focus_is_terminal(&fw_keys) {
+                return glib::Propagation::Proceed;
+            }
+            fw_keys.terminal.clear_screen();
+            return glib::Propagation::Stop;
+        }
         if !(ctrl && !shift) {
             return glib::Propagation::Proceed;
         }
@@ -1981,6 +2079,15 @@ fn focus_widget(fw: &FilesWindow) -> Option<gtk::Widget> {
 
 fn focus_is_terminal(fw: &FilesWindow) -> bool {
     focus_widget(fw).is_some_and(|f| is_descendant_of(&f, fw.terminal.root.upcast_ref()))
+}
+
+/// Compact bottom-panel height: the config/default strip, not a half-window size.
+fn compact_terminal_height(height: i32) -> i32 {
+    if (120..=360).contains(&height) {
+        height
+    } else {
+        200
+    }
 }
 
 fn focus_is_text_field(fw: &FilesWindow) -> bool {

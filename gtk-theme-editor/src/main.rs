@@ -13,11 +13,18 @@ use gtk4 as gtk;
 use gtk::cairo;
 use gtk::gdk;
 use gtk::gio;
+use gtk::glib;
+use gtk::pango;
 use gtk::prelude::*;
 
-use gtk_theme::ProfileData;
+use gtk_theme::{
+    install_chrome_ninepatch, present_file_chooser, BUTTON_KITS, ChromeBevel, ChromeGradient,
+    ProfileData, WindowChrome,
+};
 
 const APP_ID: &str = "org.neuronix.GtkThemeEditor";
+const EDITOR_WIDTH: i32 = 960;
+const EDITOR_HEIGHT: i32 = 720;
 const SUITE_WEBSITE: &str = "https://github.com/NeuronixOS/GTK-Apps";
 const SUITE_WEBSITE_LABEL: &str = "github.com/NeuronixOS/GTK-Apps";
 const SUITE_AUTHOR: &str = "Created by Kevin Hinds";
@@ -61,6 +68,10 @@ struct Ui {
     active_border_hex: Vec<gtk::Entry>,
     inactive_border_btns: Vec<gtk::ColorDialogButton>,
     inactive_border_hex: Vec<gtk::Entry>,
+    bar_btns: Vec<gtk::ColorDialogButton>,
+    bar_hex: Vec<gtk::Entry>,
+    bar_inactive_btns: Vec<gtk::ColorDialogButton>,
+    bar_inactive_hex: Vec<gtk::Entry>,
     pal_btns: Vec<gtk::ColorDialogButton>,
     pal_hex: Vec<gtk::Entry>,
 
@@ -69,6 +80,19 @@ struct Ui {
     bg_swatch: gtk::DrawingArea,
     active_border_swatch: gtk::DrawingArea,
     inactive_border_swatch: gtk::DrawingArea,
+    chrome_preview: gtk::DrawingArea,
+
+    thickness: gtk::Scale,
+    rounding: gtk::Scale,
+    gradient_dropdown: gtk::DropDown,
+    bevel_dropdown: gtk::DropDown,
+    kit_dropdown: gtk::DropDown,
+    min_entry: gtk::Entry,
+    max_entry: gtk::Entry,
+    close_entry: gtk::Entry,
+    ninepatch_label: gtk::Label,
+    ninepatch_btn: gtk::Button,
+    ninepatch_clear: gtk::Button,
 
     delete_btn: gtk::Button,
     status: gtk::Label,
@@ -76,9 +100,27 @@ struct Ui {
 
 fn main() -> gtk::glib::ExitCode {
     let app = gtk::Application::builder().application_id(APP_ID).build();
-    app.connect_startup(install_about_action);
+    app.connect_startup(|app| {
+        install_about_action(app);
+        install_glyph_css();
+    });
     app.connect_activate(build_ui);
     app.run()
+}
+
+fn install_glyph_css() {
+    let Some(display) = gdk::Display::default() else {
+        return;
+    };
+    let provider = gtk::CssProvider::new();
+    provider.load_from_data(
+        ".chrome-glyph { font-family: \"DejaVu Sans\", \"Symbols Nerd Font\", sans-serif; font-size: 14pt; }",
+    );
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
 }
 
 fn install_about_action(app: &gtk::Application) {
@@ -95,7 +137,7 @@ fn show_about(app: &gtk::Application) {
         .program_name("GTK Theme Editor")
         .version(env!("CARGO_PKG_VERSION"))
         .comments(
-            "Edit suite color profiles (foreground, background, active/inactive window-border gradients, and 16-color palette) for Neuronix GTK-Apps.",
+            "Edit suite color profiles, window chrome (thickness, rounding, − □ ×), and 16-color palette for Neuronix GTK-Apps.",
         )
         .authors([SUITE_AUTHOR])
         .website(SUITE_WEBSITE)
@@ -116,13 +158,17 @@ fn build_ui(app: &gtk::Application) {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("GTK Theme Editor")
-        .default_width(960)
-        .default_height(720)
+        .default_width(EDITOR_WIDTH)
+        .default_height(EDITOR_HEIGHT)
+        .decorated(false)
         .build();
 
-    // ---- header bar ----------------------------------------------------
+    // Toolbar lives in the content box (not a CSD titlebar). Hyprbars owns
+    // the real title bar; a GTK titlebar advertises CSD extents that make
+    // this window jump and snap size when you click-drag it.
     let header = gtk::HeaderBar::new();
     gtk_theme::prepare_headerbar(&header);
+    header.set_show_title_buttons(false);
 
     let base_label = gtk::Label::new(Some("Base:"));
     base_label.add_css_class("dim-label");
@@ -151,8 +197,6 @@ fn build_ui(app: &gtk::Application) {
     about_btn.set_menu_model(Some(&about_menu));
     header.pack_end(&about_btn);
 
-    window.set_titlebar(Some(&header));
-
     // ---- editor column -------------------------------------------------
     let editor = gtk::Box::new(gtk::Orientation::Vertical, 12);
     editor.set_margin_top(16);
@@ -175,12 +219,9 @@ fn build_ui(app: &gtk::Application) {
     border_heading.set_xalign(0.0);
     border_heading.add_css_class("heading");
     editor.append(&border_heading);
-    let border_hint = gtk::Label::new(Some(
-        "Hyprland draws a two-color 45° gradient around each window. Active is the focused ring; Inactive is every other window.",
-    ));
-    border_hint.set_xalign(0.0);
-    border_hint.set_wrap(true);
-    border_hint.add_css_class("dim-label");
+    let border_hint = wrap_hint(
+        "Hyprland draws a two-color left→right or right→left gradient around each window. Active is the focused ring; Inactive is every other window.",
+    );
     editor.append(&border_hint);
 
     let (active_border_btns, active_border_hex, active_section) =
@@ -190,17 +231,41 @@ fn build_ui(app: &gtk::Application) {
     editor.append(&active_section);
     editor.append(&inactive_section);
 
+    let gradient_dropdown =
+        gtk::DropDown::from_strings(&["Left → Right", "Right → Left"]);
+    gradient_dropdown.set_tooltip_text(Some(
+        "Direction for window borders and the hyprbars title bar",
+    ));
+    editor.append(&field_row("Gradient", &gradient_dropdown));
+
+    editor.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let (
+        thickness,
+        rounding,
+        bevel_dropdown,
+        kit_dropdown,
+        min_entry,
+        max_entry,
+        close_entry,
+        ninepatch_label,
+        ninepatch_btn,
+        ninepatch_clear,
+        bar_btns,
+        bar_hex,
+        bar_inactive_btns,
+        bar_inactive_hex,
+        chrome_section,
+    ) = build_chrome_fields();
+    editor.append(&chrome_section);
+
     editor.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     let pal_heading = gtk::Label::new(Some("Palette (ANSI 0–15)"));
     pal_heading.set_xalign(0.0);
     pal_heading.add_css_class("heading");
     editor.append(&pal_heading);
-    let accent_hint = gtk::Label::new(Some(
+    let accent_hint = wrap_hint(
         "Slot 4 (Accent / Blue) is --accent-blue: file selection, text highlight, tabs, suggested buttons.",
-    ));
-    accent_hint.set_xalign(0.0);
-    accent_hint.set_wrap(true);
-    accent_hint.add_css_class("dim-label");
+    );
     editor.append(&accent_hint);
 
     let pal_grid = gtk::Grid::new();
@@ -230,21 +295,41 @@ fn build_ui(app: &gtk::Application) {
 
     let editor_scroll = gtk::ScrolledWindow::new();
     editor_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    editor_scroll.set_propagate_natural_width(false);
+    editor_scroll.set_propagate_natural_height(false);
     editor_scroll.set_child(Some(&editor));
     editor_scroll.set_hexpand(true);
     editor_scroll.set_vexpand(true);
 
     // ---- preview column ------------------------------------------------
-    let (preview, palette_area, fg_swatch, bg_swatch, active_border_swatch, inactive_border_swatch) =
-        build_preview();
+    let (
+        preview,
+        palette_area,
+        fg_swatch,
+        bg_swatch,
+        active_border_swatch,
+        inactive_border_swatch,
+        chrome_preview,
+    ) = build_preview();
+
+    let preview_scroll = gtk::ScrolledWindow::new();
+    preview_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    preview_scroll.set_propagate_natural_width(false);
+    preview_scroll.set_propagate_natural_height(false);
+    preview_scroll.set_child(Some(&preview));
+    preview_scroll.set_hexpand(true);
+    preview_scroll.set_vexpand(true);
 
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     paned.set_start_child(Some(&editor_scroll));
-    paned.set_end_child(Some(&preview));
+    paned.set_end_child(Some(&preview_scroll));
     paned.set_position(380);
     paned.set_wide_handle(true);
+    paned.set_hexpand(true);
+    paned.set_vexpand(true);
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    root.append(&header);
     root.append(&paned);
 
     let status = gtk::Label::new(Some("Ready"));
@@ -280,6 +365,10 @@ fn build_ui(app: &gtk::Application) {
         active_border_hex,
         inactive_border_btns,
         inactive_border_hex,
+        bar_btns,
+        bar_hex,
+        bar_inactive_btns,
+        bar_inactive_hex,
         pal_btns,
         pal_hex,
         palette_area,
@@ -287,16 +376,31 @@ fn build_ui(app: &gtk::Application) {
         bg_swatch,
         active_border_swatch,
         inactive_border_swatch,
+        chrome_preview,
+        thickness,
+        rounding,
+        gradient_dropdown,
+        bevel_dropdown,
+        kit_dropdown,
+        min_entry,
+        max_entry,
+        close_entry,
+        ninepatch_label,
+        ninepatch_btn,
+        ninepatch_clear,
         delete_btn,
         status,
     });
 
     wire_preview(&ui);
+    wire_chrome(&ui);
     wire_color_field(&ui, Field::Foreground);
     wire_color_field(&ui, Field::Background);
     for i in 0..2 {
         wire_color_field(&ui, Field::ActiveBorder(i));
         wire_color_field(&ui, Field::InactiveBorder(i));
+        wire_color_field(&ui, Field::Bar(i));
+        wire_color_field(&ui, Field::BarInactive(i));
     }
     for i in 0..16 {
         wire_color_field(&ui, Field::Palette(i));
@@ -309,11 +413,90 @@ fn build_ui(app: &gtk::Application) {
     load_into_fields(&ui, initial);
 
     ui.window.present();
+    ui.window.set_default_size(EDITOR_WIDTH, EDITOR_HEIGHT);
+    snap_editor_window_size();
 }
 
 // ---------------------------------------------------------------------------
 // layout helpers
 // ---------------------------------------------------------------------------
+
+/// Hyprland restores the last floating size for this class (often a stretched
+/// tile). Float once if needed, then keep requesting the design size until
+/// the compositor actually has the window — a single early dispatch is a no-op.
+fn snap_editor_window_size() {
+    let attempts = Rc::new(Cell::new(0u32));
+    glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+        let n = attempts.get();
+        attempts.set(n + 1);
+        match theme_editor_geom() {
+            None => {}
+            Some((floating, w, h)) => {
+                if !floating {
+                    hyprctl_dispatch("setfloating", "class:^(org.neuronix.GtkThemeEditor)$");
+                }
+                if w != EDITOR_WIDTH || h != EDITOR_HEIGHT {
+                    hyprctl_dispatch(
+                        "resizewindowpixel",
+                        &format!(
+                            "exact {EDITOR_WIDTH} {EDITOR_HEIGHT},class:^(org.neuronix.GtkThemeEditor)$"
+                        ),
+                    );
+                }
+            }
+        }
+        // Hyprland often maps at 960 then restores the last tiled/floating
+        // size a moment later — keep enforcing through that restore.
+        if n >= 24 {
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
+}
+
+fn hyprctl_dispatch(name: &str, args: &str) {
+    let _ = std::process::Command::new("hyprctl")
+        .args(["dispatch", name, args])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+fn theme_editor_geom() -> Option<(bool, i32, i32)> {
+    let out = std::process::Command::new("hyprctl")
+        .args(["-j", "clients"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let idx = text.find("\"class\": \"org.neuronix.GtkThemeEditor\"")?;
+    let slice = &text[idx.saturating_sub(800)..idx];
+    let floating_at = slice.rfind("\"floating\":")?;
+    let floating = slice[floating_at..].starts_with("\"floating\": true");
+    let size_at = slice.rfind("\"size\":")?;
+    let rest = &slice[size_at..];
+    let a = rest.find('[')?;
+    let b = rest.find(']')?;
+    let mut parts = rest[a + 1..b].split(',');
+    let w = parts.next()?.trim().parse().ok()?;
+    let h = parts.next()?.trim().parse().ok()?;
+    Some((floating, w, h))
+}
+
+fn wrap_hint(text: &str) -> gtk::Label {
+    let hint = gtk::Label::new(Some(text));
+    hint.set_xalign(0.0);
+    hint.set_wrap(true);
+    hint.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    hint.set_max_width_chars(42);
+    hint.set_hexpand(true);
+    hint.add_css_class("dim-label");
+    hint
+}
 
 fn field_row(label: &str, child: &impl IsA<gtk::Widget>) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
@@ -364,8 +547,128 @@ fn gradient_pair_fields(
     (btns, hexes, section)
 }
 
+fn scale_row(label: &str, min: f64, max: f64, value: f64) -> (gtk::Scale, gtk::Box) {
+    let adj = gtk::Adjustment::new(value, min, max, 1.0, 4.0, 0.0);
+    let scale = gtk::Scale::new(gtk::Orientation::Horizontal, Some(&adj));
+    scale.set_digits(0);
+    scale.set_draw_value(true);
+    scale.set_hexpand(true);
+    scale.set_value_pos(gtk::PositionType::Right);
+    let row = field_row(label, &scale);
+    (scale, row)
+}
+
+fn build_chrome_fields() -> (
+    gtk::Scale,
+    gtk::Scale,
+    gtk::DropDown,
+    gtk::DropDown,
+    gtk::Entry,
+    gtk::Entry,
+    gtk::Entry,
+    gtk::Label,
+    gtk::Button,
+    gtk::Button,
+    Vec<gtk::ColorDialogButton>,
+    Vec<gtk::Entry>,
+    Vec<gtk::ColorDialogButton>,
+    Vec<gtk::Entry>,
+    gtk::Box,
+) {
+    let section = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let heading = gtk::Label::new(Some("Window"));
+    heading.set_xalign(0.0);
+    heading.add_css_class("heading");
+    section.append(&heading);
+    let hint = wrap_hint(
+        "Thickness and rounding apply to every Hyprland window. Corners stay arcs at the current radius (parametric 9-cell). − □ × are hyprbars font glyphs.",
+    );
+    section.append(&hint);
+
+    let (thickness, thick_row) = scale_row("Thickness", 1.0, 32.0, 10.0);
+    let (rounding, round_row) = scale_row("Rounding", 0.0, 32.0, 8.0);
+    section.append(&thick_row);
+    section.append(&round_row);
+
+    let bevel_dropdown =
+        gtk::DropDown::from_strings(&["Flat", "Inner highlight", "Double ring"]);
+    bevel_dropdown.set_tooltip_text(Some("Preview bevel; Hyprland still uses the outline colors"));
+    section.append(&field_row("Bevel", &bevel_dropdown));
+
+    let (bar_btns, bar_hex, bar_section) =
+        gradient_pair_fields("Active title bar", "Color 1", "Color 2");
+    section.append(&bar_section);
+    let (bar_inactive_btns, bar_inactive_hex, ibar_section) =
+        gradient_pair_fields("Inactive title bar", "Color 1", "Color 2");
+    section.append(&ibar_section);
+
+    let kit_labels: Vec<&str> = BUTTON_KITS.iter().map(|k| k.1).collect();
+    let kit_dropdown = gtk::DropDown::from_strings(kit_labels.as_slice());
+    kit_dropdown.set_tooltip_text(Some("Glyph kit for minimize / maximize / close"));
+    section.append(&field_row("Buttons", &kit_dropdown));
+
+    let glyphs = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let min_entry = gtk::Entry::new();
+    min_entry.set_max_width_chars(4);
+    min_entry.set_width_chars(3);
+    min_entry.set_tooltip_text(Some("Minimize"));
+    style_glyph_entry(&min_entry);
+    let max_entry = gtk::Entry::new();
+    max_entry.set_max_width_chars(4);
+    max_entry.set_width_chars(3);
+    max_entry.set_tooltip_text(Some("Maximize"));
+    style_glyph_entry(&max_entry);
+    let close_entry = gtk::Entry::new();
+    close_entry.set_max_width_chars(4);
+    close_entry.set_width_chars(3);
+    close_entry.set_tooltip_text(Some("Close"));
+    style_glyph_entry(&close_entry);
+    glyphs.append(&min_entry);
+    glyphs.append(&max_entry);
+    glyphs.append(&close_entry);
+    section.append(&field_row("Glyphs", &glyphs));
+
+    let nine_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let nine_btn = gtk::Button::with_label("9-patch PNG…");
+    nine_btn.set_tooltip_text(Some(
+        "Import an Android-style .9.png. Apply to Suite paints it around real windows.",
+    ));
+    let ninepatch_label = gtk::Label::new(Some("No PNG (parametric)"));
+    ninepatch_label.set_xalign(0.0);
+    ninepatch_label.set_hexpand(true);
+    ninepatch_label.add_css_class("dim-label");
+    ninepatch_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    let nine_clear = gtk::Button::with_label("Clear");
+    nine_clear.set_tooltip_text(Some(
+        "Drop the PNG and restore the parametric Hyprland border",
+    ));
+    nine_row.append(&nine_btn);
+    nine_row.append(&nine_clear);
+    nine_row.append(&ninepatch_label);
+    section.append(&nine_row);
+
+    (
+        thickness,
+        rounding,
+        bevel_dropdown,
+        kit_dropdown,
+        min_entry,
+        max_entry,
+        close_entry,
+        ninepatch_label,
+        nine_btn,
+        nine_clear,
+        bar_btns,
+        bar_hex,
+        bar_inactive_btns,
+        bar_inactive_hex,
+        section,
+    )
+}
+
 fn build_preview() -> (
     gtk::Box,
+    gtk::DrawingArea,
     gtk::DrawingArea,
     gtk::DrawingArea,
     gtk::DrawingArea,
@@ -383,6 +686,15 @@ fn build_preview() -> (
     heading.set_xalign(0.0);
     heading.add_css_class("heading");
     preview.append(&heading);
+
+    let chrome_label = gtk::Label::new(Some("Window chrome"));
+    chrome_label.set_xalign(0.0);
+    chrome_label.add_css_class("dim-label");
+    preview.append(&chrome_label);
+    let chrome_preview = gtk::DrawingArea::new();
+    chrome_preview.set_content_height(220);
+    chrome_preview.set_hexpand(true);
+    preview.append(&chrome_preview);
 
     // Fake header bar
     let fake_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -513,7 +825,7 @@ fn build_preview() -> (
     palette_area.set_hexpand(true);
     preview.append(&palette_area);
 
-    (preview, palette_area, fg_swatch, bg_swatch, active_border_swatch, inactive_border_swatch)
+    (preview, palette_area, fg_swatch, bg_swatch, active_border_swatch, inactive_border_swatch, chrome_preview)
 }
 
 fn labeled_swatch(label: &str) -> (gtk::Box, gtk::DrawingArea) {
@@ -539,6 +851,8 @@ enum Field {
     Background,
     ActiveBorder(usize),
     InactiveBorder(usize),
+    Bar(usize),
+    BarInactive(usize),
     Palette(usize),
 }
 
@@ -549,6 +863,8 @@ impl Field {
             Field::Background => (&ui.bg_btn, &ui.bg_hex),
             Field::ActiveBorder(i) => (&ui.active_border_btns[*i], &ui.active_border_hex[*i]),
             Field::InactiveBorder(i) => (&ui.inactive_border_btns[*i], &ui.inactive_border_hex[*i]),
+            Field::Bar(i) => (&ui.bar_btns[*i], &ui.bar_hex[*i]),
+            Field::BarInactive(i) => (&ui.bar_inactive_btns[*i], &ui.bar_inactive_hex[*i]),
             Field::Palette(i) => (&ui.pal_btns[*i], &ui.pal_hex[*i]),
         }
     }
@@ -560,6 +876,8 @@ impl Field {
             Field::Background => w.background = hex,
             Field::ActiveBorder(i) => w.set_active_border_stop(*i, hex),
             Field::InactiveBorder(i) => w.set_inactive_border_stop(*i, hex),
+            Field::Bar(i) => w.set_bar_stop(*i, hex),
+            Field::BarInactive(i) => w.set_bar_inactive_stop(*i, hex),
             Field::Palette(i) => {
                 if w.palette.len() < 16 {
                     w.palette.resize(16, "#000000".to_string());
@@ -683,6 +1001,13 @@ fn wire_preview(ui: &Rc<Ui>) {
         });
     }
     {
+        let area = ui.chrome_preview.clone();
+        let u = ui.clone();
+        area.set_draw_func(move |_, cr, w, h| {
+            draw_window_chrome(cr, w, h, &u.working.borrow());
+        });
+    }
+    {
         let area = ui.fg_swatch.clone();
         let u = ui.clone();
         area.set_draw_func(move |_, cr, w, h| {
@@ -705,7 +1030,7 @@ fn wire_preview(ui: &Rc<Ui>) {
                 let h = data.border_hex();
                 [h.clone(), h]
             });
-            draw_gradient(cr, w, h, &a, &b);
+            draw_gradient(cr, w, h, &a, &b, data.chrome_or_default().gradient.is_rtl());
         });
     }
     {
@@ -717,7 +1042,7 @@ fn wire_preview(ui: &Rc<Ui>) {
                 let x = data.background.clone();
                 [x.clone(), x]
             });
-            draw_gradient(cr, w, h, &c0, &c1);
+            draw_gradient(cr, w, h, &c0, &c1, data.chrome_or_default().gradient.is_rtl());
         });
     }
 }
@@ -753,6 +1078,33 @@ fn load_into_fields(ui: &Rc<Ui>, data: ProfileData) {
     for i in 0..16 {
         set_swatch(&ui.pal_btns[i], &ui.pal_hex[i], &pal[i]);
     }
+    let chrome = seeded.chrome_or_default();
+    ui.thickness.set_value(chrome.border_size as f64);
+    ui.rounding.set_value(chrome.rounding as f64);
+    ui.bevel_dropdown.set_selected(match chrome.bevel {
+        ChromeBevel::Flat => 0,
+        ChromeBevel::Inner => 1,
+        ChromeBevel::Double => 2,
+    });
+    ui.gradient_dropdown.set_selected(match chrome.gradient {
+        ChromeGradient::Ltr => 0,
+        ChromeGradient::Rtl => 1,
+    });
+    let bar = chrome.bar_stops(&seeded.background, &seeded.foreground);
+    let ibar = chrome.bar_inactive_stops(&seeded.background, &seeded.background);
+    for i in 0..2 {
+        set_swatch(&ui.bar_btns[i], &ui.bar_hex[i], &bar[i]);
+        set_swatch(&ui.bar_inactive_btns[i], &ui.bar_inactive_hex[i], &ibar[i]);
+    }
+    let kit_idx = BUTTON_KITS
+        .iter()
+        .position(|(id, _, _, _, _)| *id == chrome.buttons.kit)
+        .unwrap_or(0);
+    ui.kit_dropdown.set_selected(kit_idx as u32);
+    ui.min_entry.set_text(&chrome.buttons.minimize);
+    ui.max_entry.set_text(&chrome.buttons.maximize);
+    ui.close_entry.set_text(&chrome.buttons.close);
+    set_ninepatch_label(ui, chrome.ninepatch.as_deref());
     *ui.working.borrow_mut() = seeded;
     ui.updating.set(false);
     apply_live(ui);
@@ -822,12 +1174,164 @@ fn apply_live(ui: &Rc<Ui>) {
     ui.bg_swatch.queue_draw();
     ui.active_border_swatch.queue_draw();
     ui.inactive_border_swatch.queue_draw();
+    ui.chrome_preview.queue_draw();
 }
 
 fn preview_border_if_needed(ui: &Rc<Ui>, field: Field) {
-    if matches!(field, Field::ActiveBorder(_) | Field::InactiveBorder(_)) {
+    if matches!(
+        field,
+        Field::ActiveBorder(_) | Field::InactiveBorder(_) | Field::Bar(_) | Field::BarInactive(_)
+    ) {
         gtk_theme::preview_window_border(&ui.working.borrow());
     }
+}
+
+fn set_ninepatch_label(ui: &Ui, path: Option<&str>) {
+    match path {
+        Some(p) if !p.is_empty() => ui.ninepatch_label.set_text(p),
+        _ => ui.ninepatch_label.set_text("No PNG (parametric)"),
+    }
+}
+
+fn wire_chrome(ui: &Rc<Ui>) {
+    {
+        let scale = ui.thickness.clone();
+        let ui = ui.clone();
+        scale.connect_value_changed(move |scale| {
+            if ui.updating.get() {
+                return;
+            }
+            ui.working.borrow_mut().chrome_mut().border_size = scale.value().round() as u32;
+            apply_live(&ui);
+            gtk_theme::preview_window_border(&ui.working.borrow());
+        });
+    }
+    {
+        let scale = ui.rounding.clone();
+        let ui = ui.clone();
+        scale.connect_value_changed(move |scale| {
+            if ui.updating.get() {
+                return;
+            }
+            ui.working.borrow_mut().chrome_mut().rounding = scale.value().round() as u32;
+            apply_live(&ui);
+            gtk_theme::preview_window_border(&ui.working.borrow());
+        });
+    }
+    {
+        let dd = ui.gradient_dropdown.clone();
+        let ui = ui.clone();
+        dd.connect_selected_notify(move |dd| {
+            if ui.updating.get() {
+                return;
+            }
+            let gradient = match dd.selected() {
+                1 => ChromeGradient::Rtl,
+                _ => ChromeGradient::Ltr,
+            };
+            ui.working.borrow_mut().chrome_mut().gradient = gradient;
+            apply_live(&ui);
+            gtk_theme::preview_window_border(&ui.working.borrow());
+        });
+    }
+    {
+        let dd = ui.bevel_dropdown.clone();
+        let ui = ui.clone();
+        dd.connect_selected_notify(move |dd| {
+            if ui.updating.get() {
+                return;
+            }
+            let bevel = match dd.selected() {
+                1 => ChromeBevel::Inner,
+                2 => ChromeBevel::Double,
+                _ => ChromeBevel::Flat,
+            };
+            ui.working.borrow_mut().chrome_mut().bevel = bevel;
+            apply_live(&ui);
+        });
+    }
+    {
+        let dd = ui.kit_dropdown.clone();
+        let ui = ui.clone();
+        dd.connect_selected_notify(move |dd| {
+            if ui.updating.get() {
+                return;
+            }
+            let idx = dd.selected() as usize;
+            let kit = BUTTON_KITS.get(idx).map(|k| k.0).unwrap_or("gnome");
+            {
+                let mut data = ui.working.borrow_mut();
+                data.chrome_mut().buttons.apply_kit(kit);
+            }
+            let chrome = ui.working.borrow().chrome_or_default();
+            ui.updating.set(true);
+            ui.min_entry.set_text(&chrome.buttons.minimize);
+            ui.max_entry.set_text(&chrome.buttons.maximize);
+            ui.close_entry.set_text(&chrome.buttons.close);
+            ui.updating.set(false);
+            apply_live(&ui);
+        });
+    }
+    wire_glyph_entry(ui, &ui.min_entry, |c, v| c.buttons.minimize = v);
+    wire_glyph_entry(ui, &ui.max_entry, |c, v| c.buttons.maximize = v);
+    wire_glyph_entry(ui, &ui.close_entry, |c, v| c.buttons.close = v);
+    {
+        let btn = ui.ninepatch_btn.clone();
+        let ui = ui.clone();
+        btn.connect_clicked(move |_| {
+            let filter = gtk::FileFilter::new();
+            filter.add_mime_type("image/png");
+            filter.set_name(Some("PNG image"));
+            let window = ui.window.clone();
+            let ui = ui.clone();
+            present_file_chooser(
+                Some(&window),
+                "9-patch PNG",
+                gtk::FileChooserAction::Open,
+                "Open",
+                Some(&filter),
+                None,
+                move |file| {
+                    let Some(file) = file else {
+                        return;
+                    };
+                    let Some(path) = file.path() else {
+                        return;
+                    };
+                    let id = ui.working.borrow().id.clone();
+                    if let Some(dest) = install_chrome_ninepatch(&id, &path) {
+                        let shown = dest.display().to_string();
+                        ui.working.borrow_mut().chrome_mut().ninepatch = Some(shown.clone());
+                        set_ninepatch_label(&ui, Some(&shown));
+                        apply_live(&ui);
+                    }
+                },
+            );
+        });
+    }
+    {
+        let btn = ui.ninepatch_clear.clone();
+        let ui = ui.clone();
+        btn.connect_clicked(move |_| {
+            if ui.updating.get() {
+                return;
+            }
+            ui.working.borrow_mut().chrome_mut().ninepatch = None;
+            set_ninepatch_label(&ui, None);
+            apply_live(&ui);
+        });
+    }
+}
+
+fn wire_glyph_entry(ui: &Rc<Ui>, entry: &gtk::Entry, set: fn(&mut WindowChrome, String)) {
+    let ui = ui.clone();
+    entry.connect_changed(move |e| {
+        if ui.updating.get() {
+            return;
+        }
+        set(ui.working.borrow_mut().chrome_mut(), e.text().to_string());
+        apply_live(&ui);
+    });
 }
 
 fn set_status(ui: &Rc<Ui>, text: &str) {
@@ -861,10 +1365,15 @@ fn draw_single(cr: &cairo::Context, w: i32, h: i32, hex: &str) {
     let _ = cr.stroke();
 }
 
-fn draw_gradient(cr: &cairo::Context, w: i32, h: i32, a: &str, b: &str) {
+fn draw_gradient(cr: &cairo::Context, w: i32, h: i32, a: &str, b: &str, rtl: bool) {
     let ra = a.parse::<gdk::RGBA>().unwrap_or(gdk::RGBA::BLACK);
     let rb = b.parse::<gdk::RGBA>().unwrap_or(gdk::RGBA::BLACK);
-    let pat = cairo::LinearGradient::new(0.0, 0.0, w as f64, h as f64);
+    let (x0, x1) = if rtl {
+        (w as f64, 0.0)
+    } else {
+        (0.0, w as f64)
+    };
+    let pat = cairo::LinearGradient::new(x0, 0.0, x1, 0.0);
     pat.add_color_stop_rgb(0.0, ra.red() as f64, ra.green() as f64, ra.blue() as f64);
     pat.add_color_stop_rgb(1.0, rb.red() as f64, rb.green() as f64, rb.blue() as f64);
     let _ = cr.set_source(&pat);
@@ -896,4 +1405,521 @@ fn draw_palette(cr: &cairo::Context, w: i32, h: i32, data: &ProfileData) {
         cr.move_to(i as f64 * cell + 3.0, h as f64 - 5.0);
         let _ = cr.show_text(&format!("{i}"));
     }
+}
+
+fn rgb_of(hex: &str) -> (f64, f64, f64) {
+    let rgba = hex.parse::<gdk::RGBA>().unwrap_or(gdk::RGBA::BLACK);
+    (rgba.red() as f64, rgba.green() as f64, rgba.blue() as f64)
+}
+
+fn mix_rgb(a: (f64, f64, f64), b: (f64, f64, f64), t: f64) -> (f64, f64, f64) {
+    (
+        a.0 + (b.0 - a.0) * t,
+        a.1 + (b.1 - a.1) * t,
+        a.2 + (b.2 - a.2) * t,
+    )
+}
+
+fn bar_rgb_pair(
+    chrome: &WindowChrome,
+    fill: (f64, f64, f64),
+    fg: (f64, f64, f64),
+    focused: bool,
+) -> ((f64, f64, f64), (f64, f64, f64)) {
+    let src = if focused {
+        chrome.bar.as_ref()
+    } else {
+        chrome.bar_inactive.as_ref().or(chrome.bar.as_ref())
+    };
+    if let Some(v) = src {
+        let a = v
+            .first()
+            .map(|s| rgb_of(s))
+            .unwrap_or_else(|| mix_rgb(fill, fg, if focused { 0.10 } else { 0.06 }));
+        let b = v
+            .get(1)
+            .map(|s| rgb_of(s))
+            .unwrap_or_else(|| mix_rgb(a, fg, if focused { 0.22 } else { 0.10 }));
+        return (a, b);
+    }
+    if focused {
+        (mix_rgb(fill, fg, 0.10), mix_rgb(fill, fg, 0.22))
+    } else {
+        (mix_rgb(fill, fg, 0.06), mix_rgb(fill, (0.0, 0.0, 0.0), 0.12))
+    }
+}
+
+/// Hyprbars draws − □ × / Nerd PUA via Pango/fontconfig. Cairo's toy API
+/// (`select_font_face`) does not, which is why the preview showed empty boxes.
+const CHROME_FONT: &str = "DejaVu Sans, Symbols Nerd Font, Symbols Nerd Font Mono, Ubuntu Nerd Font, sans-serif";
+
+fn style_glyph_entry(entry: &gtk::Entry) {
+    entry.add_css_class("chrome-glyph");
+}
+
+fn chrome_font(px: f64, bold: bool) -> pango::FontDescription {
+    let mut desc = pango::FontDescription::from_string(CHROME_FONT);
+    if bold {
+        desc.set_weight(pango::Weight::Bold);
+    }
+    desc.set_absolute_size(px * f64::from(pango::SCALE));
+    desc
+}
+
+fn pango_layout(cr: &cairo::Context, text: &str, px: f64, bold: bool) -> pango::Layout {
+    let layout = pangocairo::functions::create_layout(cr);
+    layout.set_font_description(Some(&chrome_font(px, bold)));
+    layout.set_text(text);
+    layout
+}
+
+fn pango_measure(cr: &cairo::Context, text: &str, px: f64, bold: bool) -> (i32, i32) {
+    pango_layout(cr, text, px, bold).pixel_size()
+}
+
+fn pango_show(cr: &cairo::Context, x: f64, y: f64, text: &str, px: f64, bold: bool) {
+    let layout = pango_layout(cr, text, px, bold);
+    cr.move_to(x, y);
+    pangocairo::functions::show_layout(cr, &layout);
+}
+
+fn rounded_rect(cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
+    let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
+    if r < 0.5 {
+        cr.rectangle(x, y, w, h);
+        return;
+    }
+    cr.new_sub_path();
+    cr.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
+    cr.arc(x + w - r, y + h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
+    cr.arc(x + r, y + h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
+    cr.arc(x + r, y + r, r, std::f64::consts::PI, 3.0 * std::f64::consts::FRAC_PI_2);
+    cr.close_path();
+}
+
+fn draw_window_chrome(cr: &cairo::Context, w: i32, h: i32, data: &ProfileData) {
+    let chrome = data.chrome_or_default();
+    let bg = rgb_of(&data.background);
+    let fg = rgb_of(&data.foreground);
+    let [a0, a1] = data.active_border_stops().unwrap_or_else(|| {
+        let hex = data.border_hex();
+        [hex.clone(), hex]
+    });
+    let [i0, i1] = data.inactive_border_stops().unwrap_or_else(|| {
+        let hex = data.background.clone();
+        [hex.clone(), hex]
+    });
+
+    cr.set_source_rgb(bg.0 * 0.55, bg.1 * 0.55, bg.2 * 0.55);
+    let _ = cr.paint();
+
+    let pad = 8.0;
+    let stack = 20.0;
+    let fw = (w as f64 - pad * 2.0 - stack).max(48.0);
+    let fh = (h as f64 - pad * 2.0 - stack).max(56.0);
+
+    let mut nine: Option<(cairo::ImageSurface, i32, i32, i32, i32, bool)> = None;
+    if let Some(path) = chrome.ninepatch.as_deref() {
+        if let Some(mut surf) = load_png_surface(path) {
+            let insets = nine_slice_insets(&mut surf);
+            nine = Some((surf, insets.0, insets.1, insets.2, insets.3, insets.4));
+        }
+    }
+    let nine_ref = nine.as_ref();
+
+    paint_fake_window(
+        cr,
+        pad + stack,
+        pad,
+        fw,
+        fh,
+        &chrome,
+        bg,
+        mix_rgb(fg, bg, 0.45),
+        rgb_of(&i0),
+        rgb_of(&i1),
+        "Inactive",
+        false,
+        nine_ref,
+    );
+    paint_fake_window(
+        cr,
+        pad,
+        pad + stack,
+        fw,
+        fh,
+        &chrome,
+        bg,
+        fg,
+        rgb_of(&a0),
+        rgb_of(&a1),
+        "Window",
+        true,
+        nine_ref,
+    );
+}
+
+fn paint_fake_window(
+    cr: &cairo::Context,
+    x: f64,
+    y: f64,
+    fw: f64,
+    fh: f64,
+    chrome: &WindowChrome,
+    bg: (f64, f64, f64),
+    fg: (f64, f64, f64),
+    outer: (f64, f64, f64),
+    inner_col: (f64, f64, f64),
+    title: &str,
+    focused: bool,
+    nine: Option<&(cairo::ImageSurface, i32, i32, i32, i32, bool)>,
+) {
+    let thickness = chrome.border_size as f64;
+    let radius = chrome.rounding as f64;
+    let highlight = mix_rgb(outer, (1.0, 1.0, 1.0), 0.45);
+    let shadow = mix_rgb(outer, (0.0, 0.0, 0.0), 0.45);
+    let fill = if focused {
+        bg
+    } else {
+        mix_rgb(bg, (0.0, 0.0, 0.0), 0.08)
+    };
+
+    let mut used_nine = false;
+    let nine_inset = nine.map(|(_, left, top, right, bottom, _)| {
+        (*left).max(*top).max(*right).max(*bottom) as f64
+    });
+    if let Some((surf, left, top, right, bottom, skip_guide)) = nine {
+        draw_nine_slice(
+            cr, surf, x, y, fw, fh, *left, *top, *right, *bottom, *skip_guide,
+        );
+        used_nine = true;
+        if !focused {
+            rounded_rect(cr, x, y, fw, fh, radius);
+            cr.set_source_rgba(fill.0, fill.1, fill.2, 0.35);
+            let _ = cr.fill();
+        }
+    }
+
+    if !used_nine {
+        rounded_rect(cr, x, y, fw, fh, radius);
+        cr.set_source_rgb(fill.0, fill.1, fill.2);
+        let _ = cr.fill();
+
+        match chrome.bevel {
+            ChromeBevel::Flat => {
+                let rtl = chrome.gradient.is_rtl();
+                let (x0, x1) = if rtl { (x + fw, x) } else { (x, x + fw) };
+                let pat = cairo::LinearGradient::new(x0, y, x1, y);
+                pat.add_color_stop_rgb(0.0, outer.0, outer.1, outer.2);
+                pat.add_color_stop_rgb(1.0, inner_col.0, inner_col.1, inner_col.2);
+                let _ = cr.set_source(&pat);
+                cr.set_line_width(thickness.max(1.0));
+                rounded_rect(
+                    cr,
+                    x + thickness / 2.0,
+                    y + thickness / 2.0,
+                    (fw - thickness).max(1.0),
+                    (fh - thickness).max(1.0),
+                    radius.max(0.0),
+                );
+                let _ = cr.stroke();
+            }
+            ChromeBevel::Inner => {
+                cr.set_source_rgb(shadow.0, shadow.1, shadow.2);
+                cr.set_line_width(thickness.max(2.0));
+                rounded_rect(
+                    cr,
+                    x + thickness / 2.0,
+                    y + thickness / 2.0,
+                    (fw - thickness).max(1.0),
+                    (fh - thickness).max(1.0),
+                    radius,
+                );
+                let _ = cr.stroke();
+                cr.set_source_rgb(highlight.0, highlight.1, highlight.2);
+                cr.set_line_width((thickness * 0.35).max(1.0));
+                let inset = thickness * 0.55;
+                rounded_rect(
+                    cr,
+                    x + inset,
+                    y + inset,
+                    (fw - inset * 2.0).max(1.0),
+                    (fh - inset * 2.0).max(1.0),
+                    (radius - inset * 0.3).max(0.0),
+                );
+                let _ = cr.stroke();
+            }
+            ChromeBevel::Double => {
+                cr.set_source_rgb(outer.0, outer.1, outer.2);
+                cr.set_line_width((thickness * 0.4).max(1.0));
+                rounded_rect(
+                    cr,
+                    x + thickness * 0.25,
+                    y + thickness * 0.25,
+                    (fw - thickness * 0.5).max(1.0),
+                    (fh - thickness * 0.5).max(1.0),
+                    radius,
+                );
+                let _ = cr.stroke();
+                cr.set_source_rgb(inner_col.0, inner_col.1, inner_col.2);
+                let inset = thickness * 0.75;
+                rounded_rect(
+                    cr,
+                    x + inset,
+                    y + inset,
+                    (fw - inset * 2.0).max(1.0),
+                    (fh - inset * 2.0).max(1.0),
+                    (radius - inset * 0.4).max(0.0),
+                );
+                let _ = cr.stroke();
+            }
+        }
+
+        if focused {
+            draw_nine_cell_guides(cr, x, y, fw, fh, thickness, radius, fg);
+        }
+    } else {
+        let inset = nine_inset.unwrap_or(thickness).max(4.0);
+        rounded_rect(
+            cr,
+            x + inset,
+            y + inset,
+            (fw - inset * 2.0).max(1.0),
+            (fh - inset * 2.0).max(1.0),
+            (radius - 2.0).max(0.0),
+        );
+        cr.set_source_rgb(fill.0, fill.1, fill.2);
+        let _ = cr.fill();
+    }
+
+    let bar_h = 22.0;
+    let bar_inset = nine_inset.unwrap_or_else(|| thickness.max(2.0)).max(2.0);
+    let inner_x = x + bar_inset;
+    let inner_y = y + bar_inset;
+    let inner_w = (fw - bar_inset * 2.0).max(8.0);
+    let (mut b0, mut b1) = bar_rgb_pair(chrome, fill, fg, focused);
+    if !focused {
+        b0 = mix_rgb(b0, (0.0, 0.0, 0.0), 0.12);
+        b1 = mix_rgb(b1, (0.0, 0.0, 0.0), 0.12);
+    }
+    let rtl = chrome.gradient.is_rtl();
+    let (x0, x1) = if rtl {
+        (inner_x + inner_w, inner_x)
+    } else {
+        (inner_x, inner_x + inner_w)
+    };
+    let pat = cairo::LinearGradient::new(x0, inner_y, x1, inner_y);
+    pat.add_color_stop_rgb(0.0, b0.0, b0.1, b0.2);
+    pat.add_color_stop_rgb(1.0, b1.0, b1.1, b1.2);
+    let _ = cr.set_source(&pat);
+    cr.rectangle(inner_x, inner_y, inner_w, bar_h);
+    let _ = cr.fill();
+
+    cr.set_source_rgb(fg.0, fg.1, fg.2);
+    pango_show(cr, inner_x + 8.0, inner_y + 4.0, title, 11.0, true);
+
+    let glyphs = [
+        chrome.buttons.minimize.as_str(),
+        chrome.buttons.maximize.as_str(),
+        chrome.buttons.close.as_str(),
+    ];
+    let glyph_px = chrome.buttons.size.min(22) as f64;
+    let mut gx = inner_x + inner_w - 8.0;
+    for g in glyphs.iter().rev() {
+        let (tw, _) = pango_measure(cr, g, glyph_px, false);
+        gx -= tw as f64 + 10.0;
+        pango_show(cr, gx, inner_y + 2.0, g, glyph_px, false);
+    }
+}
+
+fn draw_nine_cell_guides(
+    cr: &cairo::Context,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    thickness: f64,
+    _radius: f64,
+    fg: (f64, f64, f64),
+) {
+    let t = thickness.max(2.0);
+    cr.set_source_rgba(fg.0, fg.1, fg.2, 0.22);
+    cr.set_line_width(1.0);
+    cr.set_dash(&[3.0, 3.0], 0.0);
+    // Vertical splits (left/right edges vs center)
+    cr.move_to(x + t, y);
+    cr.line_to(x + t, y + h);
+    cr.move_to(x + w - t, y);
+    cr.line_to(x + w - t, y + h);
+    // Horizontal splits
+    cr.move_to(x, y + t);
+    cr.line_to(x + w, y + t);
+    cr.move_to(x, y + h - t);
+    cr.line_to(x + w, y + h - t);
+    let _ = cr.stroke();
+    cr.set_dash(&[], 0.0);
+}
+
+fn load_png_surface(path: &str) -> Option<cairo::ImageSurface> {
+    let mut file = std::fs::File::open(path).ok()?;
+    cairo::ImageSurface::create_from_png(&mut file).ok()
+}
+
+/// Returns (left, top, right, bottom, skip_1px_guide). Guide pixels are the
+/// Android 9-patch black lines on the outer edge; otherwise use equal thirds.
+fn nine_slice_insets(surf: &mut cairo::ImageSurface) -> (i32, i32, i32, i32, bool) {
+    let w = surf.width();
+    let h = surf.height();
+    let third_x = (w.max(3) / 3).max(1);
+    let third_y = (h.max(3) / 3).max(1);
+    let fallback = (third_x, third_y, third_x, third_y, false);
+    if w < 4 || h < 4 {
+        return fallback;
+    }
+    let stride = surf.stride();
+    let Ok(data) = surf.data() else {
+        return fallback;
+    };
+    let is_black = |x: i32, y: i32| -> bool {
+        let i = (y * stride + x * 4) as usize;
+        if i + 3 >= data.len() {
+            return false;
+        }
+        let (b, g, r, a) = (data[i], data[i + 1], data[i + 2], data[i + 3]);
+        a > 200 && r < 40 && g < 40 && b < 40
+    };
+    let mut first_x = None;
+    let mut last_x = None;
+    for x in 1..w - 1 {
+        if is_black(x, 0) {
+            first_x.get_or_insert(x);
+            last_x = Some(x);
+        }
+    }
+    let mut first_y = None;
+    let mut last_y = None;
+    for y in 1..h - 1 {
+        if is_black(0, y) {
+            first_y.get_or_insert(y);
+            last_y = Some(y);
+        }
+    }
+    match (first_x, last_x, first_y, last_y) {
+        (Some(fx), Some(lx), Some(fy), Some(ly)) => {
+            let inner_w = w - 2;
+            let inner_h = h - 2;
+            let left = (fx - 1).max(1);
+            let top = (fy - 1).max(1);
+            let right = (inner_w - (lx - 1)).max(1);
+            let bottom = (inner_h - (ly - 1)).max(1);
+            (left, top, right, bottom, true)
+        }
+        _ => fallback,
+    }
+}
+
+fn draw_nine_slice(
+    cr: &cairo::Context,
+    surf: &cairo::ImageSurface,
+    dx: f64,
+    dy: f64,
+    dw: f64,
+    dh: f64,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    skip_guide: bool,
+) {
+    let sw = surf.width() as f64;
+    let sh = surf.height() as f64;
+    let (sx0, sy0, src_w, src_h) = if skip_guide {
+        (1.0, 1.0, (sw - 2.0).max(1.0), (sh - 2.0).max(1.0))
+    } else {
+        (0.0, 0.0, sw, sh)
+    };
+    let l = (left as f64).min(src_w / 2.0).max(1.0);
+    let t = (top as f64).min(src_h / 2.0).max(1.0);
+    let r = (right as f64).min(src_w / 2.0).max(1.0);
+    let b = (bottom as f64).min(src_h / 2.0).max(1.0);
+    let mid_src_w = (src_w - l - r).max(1.0);
+    let mid_src_h = (src_h - t - b).max(1.0);
+    let mid_dst_w = (dw - l - r).max(1.0);
+    let mid_dst_h = (dh - t - b).max(1.0);
+
+    let cells = [
+        (sx0, sy0, l, t, dx, dy, l, t),
+        (sx0 + l, sy0, mid_src_w, t, dx + l, dy, mid_dst_w, t),
+        (sx0 + l + mid_src_w, sy0, r, t, dx + l + mid_dst_w, dy, r, t),
+        (sx0, sy0 + t, l, mid_src_h, dx, dy + t, l, mid_dst_h),
+        (
+            sx0 + l,
+            sy0 + t,
+            mid_src_w,
+            mid_src_h,
+            dx + l,
+            dy + t,
+            mid_dst_w,
+            mid_dst_h,
+        ),
+        (
+            sx0 + l + mid_src_w,
+            sy0 + t,
+            r,
+            mid_src_h,
+            dx + l + mid_dst_w,
+            dy + t,
+            r,
+            mid_dst_h,
+        ),
+        (sx0, sy0 + t + mid_src_h, l, b, dx, dy + t + mid_dst_h, l, b),
+        (
+            sx0 + l,
+            sy0 + t + mid_src_h,
+            mid_src_w,
+            b,
+            dx + l,
+            dy + t + mid_dst_h,
+            mid_dst_w,
+            b,
+        ),
+        (
+            sx0 + l + mid_src_w,
+            sy0 + t + mid_src_h,
+            r,
+            b,
+            dx + l + mid_dst_w,
+            dy + t + mid_dst_h,
+            r,
+            b,
+        ),
+    ];
+    for (sx, sy, sw, sh, dx, dy, dw, dh) in cells {
+        blit_scaled(cr, surf, sx, sy, sw, sh, dx, dy, dw, dh);
+    }
+}
+
+fn blit_scaled(
+    cr: &cairo::Context,
+    surf: &cairo::ImageSurface,
+    sx: f64,
+    sy: f64,
+    sw: f64,
+    sh: f64,
+    dx: f64,
+    dy: f64,
+    dw: f64,
+    dh: f64,
+) {
+    if sw <= 0.0 || sh <= 0.0 || dw <= 0.0 || dh <= 0.0 {
+        return;
+    }
+    let _ = cr.save();
+    cr.rectangle(dx, dy, dw, dh);
+    cr.clip();
+    cr.translate(dx, dy);
+    cr.scale(dw / sw, dh / sh);
+    let _ = cr.set_source_surface(surf, -sx, -sy);
+    let _ = cr.paint();
+    let _ = cr.restore();
 }

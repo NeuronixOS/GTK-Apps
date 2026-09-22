@@ -230,7 +230,9 @@ fn install_accels(app: &gtk::Application) {
     app.set_accels_for_action("win.go-home", &["<Alt>Home"]);
     app.set_accels_for_action("win.connect-server", &["<Primary><Alt>s"]);
     app.set_accels_for_action("win.reload", &["<Ctrl>r", "F5"]);
-    app.set_accels_for_action("win.edit-location", &["<Ctrl>l"]);
+    app.set_accels_for_action("win.edit-location", &["<Ctrl><Shift>l"]);
+    app.set_accels_for_action("win.clear-terminal", &["<Ctrl>l"]);
+    app.set_accels_for_action("win.terminal-half-height", &["<Ctrl>space"]);
     app.set_accels_for_action("win.search", &["<Ctrl>f"]);
     app.set_accels_for_action("win.find-in-files", &["<Ctrl><Shift>f"]);
     app.set_accels_for_action("win.toggle-view", &["<Ctrl>1", "<Ctrl>2"]);
@@ -273,7 +275,9 @@ Navigation
   Alt+Right / Forward Go forward
   Alt+Up              Parent folder
   Alt+Home            Home
-  Ctrl+L              Enter location
+  Ctrl+L              Clear terminal
+  Ctrl+Space          Toggle terminal half / default height
+  Ctrl+Shift+L        Enter location
   Ctrl+R / F5         Reload
 
 Tabs & windows
@@ -300,6 +304,8 @@ Files (when the file list is focused)
   Ctrl+1 / Ctrl+2     Toggle list/grid view
 
 Terminal (when the terminal is focused)
+  Ctrl+Space          Toggle terminal half / default height
+  Ctrl+L              Clear screen
   Ctrl+Shift+C        Copy
   Ctrl+Shift+V        Paste
   Ctrl+Shift+A        Select all

@@ -100,7 +100,7 @@ impl PathBar {
             });
         }
 
-        // Ctrl+L handled by window action; also support Escape in entry
+        // Ctrl+Shift+L handled by window action; also support Escape in entry
         {
             let bar2 = Rc::clone(&bar);
             let key = gtk::EventControllerKey::new();

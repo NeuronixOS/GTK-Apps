@@ -7,7 +7,7 @@
   <style name="meld:replace" background="#003266" foreground="#1d59d6" line-background="#0053a6"/>
   <style name="meld:conflict" background="#7a2a28" foreground="#ff0000" line-background="#ac3b39"/>
   <!-- FIXME: delete background should be @theme_bg_color; line should be shaded of that -->
-  <style name="meld:delete" background="#ffffff" foreground="#a40000" line-background="#cccccc"/>
+  <style name="meld:delete" background="#3d1414" foreground="#f85149" line-background="#8b1e1e"/>
   <style name="meld:error" background="#fce94f" foreground="#faad3d" line-background="#fdf8cd"/>
   <style name="meld:inline" background="#24527e"/>
   <style name="meld:current-line-highlight" foreground="#eeeeee" background="#rgba(17, 17, 0, 0.25)"/>

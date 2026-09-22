@@ -34,10 +34,24 @@ use config::Config;
 
 const APP_ID: &str = "org.neuronix.GtkTerm";
 
+#[derive(Clone, Debug)]
+struct LaunchOpts {
+    app_id: String,
+    title: Option<String>,
+    cwd: Option<PathBuf>,
+    command: Option<Vec<String>>,
+}
+
 fn main() -> glib::ExitCode {
+    let argv: Vec<OsString> = std::env::args_os().collect();
+    let opts = parse_launch_opts(&argv);
+    let mut flags = gio::ApplicationFlags::HANDLES_COMMAND_LINE;
+    if opts.app_id != APP_ID || opts.command.is_some() {
+        flags |= gio::ApplicationFlags::NON_UNIQUE;
+    }
     let app = gtk::Application::builder()
-        .application_id(APP_ID)
-        .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+        .application_id(&opts.app_id)
+        .flags(flags)
         .build();
 
     app.connect_startup(|app| {
@@ -45,9 +59,22 @@ fn main() -> glib::ExitCode {
         gtk::Window::set_default_icon_name(gtk_theme::app_icons::TERM);
         install_app_actions(app);
     });
-    app.connect_command_line(|app, cmdline| {
-        let dir = parse_working_directory(&cmdline.arguments());
-        build_ui(app, dir);
+    let opts = Rc::new(opts);
+    app.connect_command_line(move |app, cmdline| {
+        let mut parsed = parse_launch_opts(&cmdline.arguments());
+        if parsed.command.is_none() {
+            parsed.command = opts.command.clone();
+        }
+        if parsed.cwd.is_none() {
+            parsed.cwd = opts.cwd.clone();
+        }
+        if parsed.title.is_none() {
+            parsed.title = opts.title.clone();
+        }
+        if parsed.app_id == APP_ID {
+            parsed.app_id = opts.app_id.clone();
+        }
+        build_ui(app, parsed);
         0
     });
 
@@ -87,7 +114,12 @@ fn main() -> glib::ExitCode {
     app.set_accels_for_action("win.fullscreen", &["F11"]);
     app.set_accels_for_action("app.new-window", &["<Ctrl><Shift>n"]);
 
-    app.run()
+    let prog = argv
+        .first()
+        .and_then(|s| s.to_str())
+        .unwrap_or("gtk-term")
+        .to_string();
+    app.run_with_args(&[prog])
 }
 
 fn load_css(css_path: &Path) {
@@ -113,7 +145,17 @@ fn install_app_actions(app: &gtk::Application) {
     let new_window = gio::SimpleAction::new("new-window", None);
     {
         let app = app.clone();
-        new_window.connect_activate(move |_, _| build_ui(&app, None));
+        new_window.connect_activate(move |_, _| {
+            build_ui(
+                &app,
+                LaunchOpts {
+                    app_id: APP_ID.into(),
+                    title: None,
+                    cwd: None,
+                    command: None,
+                },
+            )
+        });
     }
     app.add_action(&new_window);
 
@@ -148,15 +190,44 @@ fn show_about(app: &gtk::Application) {
 // Window construction.
 // ---------------------------------------------------------------------------
 
-fn parse_working_directory(args: &[OsString]) -> Option<PathBuf> {
+fn normalize_app_id(raw: &str) -> String {
+    let s = raw.trim();
+    if s.is_empty() {
+        return APP_ID.into();
+    }
+    if s.contains('.') {
+        s.to_string()
+    } else {
+        format!("org.neuronix.{s}")
+    }
+}
+
+fn parse_launch_opts(args: &[OsString]) -> LaunchOpts {
+    let mut opts = LaunchOpts {
+        app_id: APP_ID.into(),
+        title: None,
+        cwd: None,
+        command: None,
+    };
     let mut i = 1;
     while i < args.len() {
         let a = args[i].to_string_lossy();
+        if matches!(a.as_ref(), "-e" | "--command" | "-x" | "--") {
+            let cmd: Vec<String> = args[i + 1..]
+                .iter()
+                .map(|s| s.to_string_lossy().into_owned())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !cmd.is_empty() {
+                opts.command = Some(cmd);
+            }
+            break;
+        }
         if a == "--working-directory" || a == "-w" {
             if let Some(p) = args.get(i + 1) {
                 let path = PathBuf::from(p);
                 if path.is_dir() {
-                    return Some(path);
+                    opts.cwd = Some(path);
                 }
             }
             i += 2;
@@ -165,15 +236,53 @@ fn parse_working_directory(args: &[OsString]) -> Option<PathBuf> {
         if let Some(rest) = a.strip_prefix("--working-directory=") {
             let path = PathBuf::from(rest);
             if path.is_dir() {
-                return Some(path);
+                opts.cwd = Some(path);
             }
+            i += 1;
+            continue;
+        }
+        if matches!(a.as_ref(), "--app-id" | "--class" | "--name" | "--gapplication-app-id")
+        {
+            if let Some(p) = args.get(i + 1) {
+                opts.app_id = normalize_app_id(&p.to_string_lossy());
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(rest) = a
+            .strip_prefix("--app-id=")
+            .or_else(|| a.strip_prefix("--class="))
+            .or_else(|| a.strip_prefix("--name="))
+            .or_else(|| a.strip_prefix("--gapplication-app-id="))
+        {
+            opts.app_id = normalize_app_id(rest);
+            i += 1;
+            continue;
+        }
+        if a == "--title" || a == "-T" {
+            if let Some(p) = args.get(i + 1) {
+                let t = p.to_string_lossy().into_owned();
+                if !t.is_empty() {
+                    opts.title = Some(t);
+                }
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(rest) = a.strip_prefix("--title=") {
+            if !rest.is_empty() {
+                opts.title = Some(rest.to_string());
+            }
+            i += 1;
+            continue;
         }
         i += 1;
     }
-    None
+    opts
 }
 
 const SPAWN_CWD_KEY: &str = "gtk-term-spawn-cwd";
+const SPAWN_CMD_KEY: &str = "gtk-term-spawn-cmd";
 
 fn set_window_cwd(window: &gtk::ApplicationWindow, cwd: Option<PathBuf>) {
     if let Some(dir) = cwd {
@@ -181,6 +290,18 @@ fn set_window_cwd(window: &gtk::ApplicationWindow, cwd: Option<PathBuf>) {
             window.set_data(SPAWN_CWD_KEY, dir);
         }
     }
+}
+
+fn set_window_command(window: &gtk::ApplicationWindow, command: Option<Vec<String>>) {
+    if let Some(cmd) = command {
+        unsafe {
+            window.set_data(SPAWN_CMD_KEY, cmd);
+        }
+    }
+}
+
+fn take_window_command(window: &gtk::ApplicationWindow) -> Option<Vec<String>> {
+    unsafe { window.steal_data::<Vec<String>>(SPAWN_CMD_KEY) }
 }
 
 fn window_cwd(window: &gtk::ApplicationWindow) -> Option<PathBuf> {
@@ -191,7 +312,7 @@ fn window_cwd(window: &gtk::ApplicationWindow) -> Option<PathBuf> {
     }
 }
 
-fn build_ui(app: &gtk::Application, cwd: Option<PathBuf>) {
+fn build_ui(app: &gtk::Application, opts: LaunchOpts) {
     let cfg = Rc::new(RefCell::new(config::load()));
     let mut state = config::load_state();
     // Prefer prefs grid (columns×rows) over last pixel size so “Initial
@@ -203,7 +324,11 @@ fn build_ui(app: &gtk::Application, cwd: Option<PathBuf>) {
         state.window_height = h;
     }
     let (window, notebook, zoom_label) = build_window_shell(app, Rc::clone(&cfg), &state, true);
-    set_window_cwd(&window, cwd);
+    set_window_cwd(&window, opts.cwd);
+    set_window_command(&window, opts.command);
+    if let Some(title) = opts.title.as_deref().filter(|t| !t.is_empty()) {
+        window.set_title(Some(title));
+    }
 
     create_tab(&window, &notebook, &cfg.borrow());
 
@@ -291,10 +416,14 @@ fn build_window_shell(
     let notebook = gtk::Notebook::new();
     notebook.set_scrollable(true);
     notebook.set_show_border(false);
+    notebook.set_hexpand(true);
+    notebook.set_vexpand(true);
 
     let (find_revealer, find_bar_box) = search::build_find_bar();
 
     let main_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    main_box.set_hexpand(true);
+    main_box.set_vexpand(true);
     main_box.append(&find_revealer);
     main_box.append(&notebook);
 
@@ -948,12 +1077,18 @@ fn current_terminal(notebook: &gtk::Notebook) -> Option<vte4::Terminal> {
 
 pub(crate) fn create_tab(window: &gtk::ApplicationWindow, notebook: &gtk::Notebook, config: &Config) {
     let cwd = window_cwd(window);
-    let terminal = terminal::build_terminal_in(config, cwd.as_deref());
+    let command = take_window_command(window);
+    let terminal = terminal::build_terminal_with_command(
+        config,
+        cwd.as_deref(),
+        command.as_deref(),
+    );
     terminal::apply_profile(&terminal, gtk_theme::load_profile());
 
     let scroller = gtk::ScrolledWindow::builder()
         .hexpand(true)
         .vexpand(true)
+        .propagate_natural_height(false)
         .child(&terminal)
         .build();
     scroller.add_css_class("gtk-content");

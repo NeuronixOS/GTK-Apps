@@ -1660,6 +1660,11 @@ class FileDiff(Gtk.Box, MeldDoc):
         buf.move_mark_by_name(LOAD_PROGRESS_MARK, buf.get_start_iter())
         cancellable = Gio.Cancellable()
         errors = {}
+        # Keep the FileLoader alive until file_loaded; pygobject will otherwise
+        # GC it and load_finish hits G_IS_OBJECT / G_IS_FILE assertions.
+        if not hasattr(self, "_file_loaders"):
+            self._file_loaders = {}
+        self._file_loaders[pane] = loader
         loader.load_async(
             GLib.PRIORITY_HIGH,
             cancellable=cancellable,
@@ -1735,15 +1740,29 @@ class FileDiff(Gtk.Box, MeldDoc):
         # *last* here, or the above line length accesses will be incorrect.
         buffer.move_mark(progress_mark, last_it)
 
+    def _gfile_display_name(self, gfile: Gio.File | None) -> str:
+        if gfile is None:
+            return _("(unnamed)")
+        try:
+            name = gfile.get_parse_name() or gfile.get_uri()
+        except (TypeError, GLib.Error, AttributeError):
+            name = None
+        if not name:
+            return _("(unnamed)")
+        return GLib.markup_escape_text(name)
+
     def file_loaded(
         self,
         loader: GtkSource.FileLoader,
         result: Gio.AsyncResult,
         user_data: Tuple[int, dict[int, str]],
     ):
-        gfile = loader.get_location()
-        buf = loader.get_buffer()
         pane, errors = user_data
+        try:
+            gfile = loader.get_location()
+        except (TypeError, GLib.Error):
+            gfile = None
+        buf = loader.get_buffer()
 
         try:
             loader.load_finish(result)
@@ -1768,7 +1787,7 @@ class FileDiff(Gtk.Box, MeldDoc):
                 # GtkSource.FileLoaderError.ENCODING_AUTO_DETECTION_FAILED
                 pass
 
-            filename = GLib.markup_escape_text(gfile.get_parse_name())
+            filename = self._gfile_display_name(gfile)
             primary = _("There was a problem opening the file “%s”." % filename)
             # If we have custom errors defined, use those instead
             if errors.get(pane):
@@ -1795,7 +1814,7 @@ class FileDiff(Gtk.Box, MeldDoc):
             and "\\00" in buffer_text
             and not self.msgarea_mgr[pane].has_message()
         ):
-            filename = GLib.markup_escape_text(gfile.get_parse_name())
+            filename = self._gfile_display_name(gfile)
             primary = _("File %s appears to be a binary file.") % filename
             secondary = _("Do you want to open the file using the default application?")
             self.msgarea_mgr[pane].add_action_msg(
@@ -1824,6 +1843,8 @@ class FileDiff(Gtk.Box, MeldDoc):
             self.scheduler.add_task(self._compare_files_internal())
 
         self.recompute_label()
+        if hasattr(self, "_file_loaders"):
+            self._file_loaders.pop(pane, None)
 
     def _merge_files(self):
         if self.comparison_mode == FileComparisonMode.AutoMerge:
@@ -2610,6 +2631,11 @@ class FileDiff(Gtk.Box, MeldDoc):
         for w, i in zip(self.textview, range(self.num_panes)):
             w.chunk_iter = chunk_iter(i)
             w.current_chunk_check = current_chunk_check(i)
+            # Two-way Differ compares right→left, so right-only lines are
+            # tagged "delete". Swap colours on the right pane so those paint
+            # green (added); left-only stay "delete"→red (removed). Edits are
+            # "replace"→blue on both sides.
+            w.props.paint_unique_as_removed = self.num_panes == 2 and i == 1
 
         for w, i in zip(self.linkmap, (0, self.num_panes - 2)):
             w.associate(self, self.textview[i], self.textview[i + 1])
@@ -2624,7 +2650,7 @@ class FileDiff(Gtk.Box, MeldDoc):
         buffer = self.textbuffer[pane]
         view = self.textview[pane]
 
-        clipboard = view.get_clipboard(Gdk.SELECTION_CLIPBOARD)
+        clipboard = view.get_clipboard()
         buffer.cut_clipboard(clipboard, view.get_editable())
         view.scroll_to_mark(buffer.get_insert(), 0.1, False, 0, 0)
 
@@ -2633,7 +2659,7 @@ class FileDiff(Gtk.Box, MeldDoc):
         buffer = self.textbuffer[pane]
         view = self.textview[pane]
 
-        clipboard = view.get_clipboard(Gdk.SELECTION_CLIPBOARD)
+        clipboard = view.get_clipboard()
         buffer.copy_clipboard(clipboard)
 
     @with_focused_pane
@@ -2641,7 +2667,7 @@ class FileDiff(Gtk.Box, MeldDoc):
         buffer = self.textbuffer[pane]
         view = self.textview[pane]
 
-        clipboard = view.get_clipboard(Gdk.SELECTION_CLIPBOARD)
+        clipboard = view.get_clipboard()
         buffer.paste_clipboard(clipboard, None, view.get_editable())
         view.scroll_to_mark(buffer.get_insert(), 0.1, False, 0, 0)
 

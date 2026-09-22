@@ -102,6 +102,12 @@ class GutterRendererChunkLines(GtkSource.GutterRendererText):
     def on_cursor_moved(self, buf, *args):
         self.queue_draw()
 
+    def _chunk_colours(self):
+        view = self.get_view()
+        if view is not None and getattr(view, "fill_colors", None):
+            return view.fill_colors, view.line_colors
+        return get_common_theme()
+
     def do_snapshot_line(self, snapshot, lines, line):
         idx = self.linediffer.locate_chunk(self.from_pane, line)[0]
         if idx is not None:
@@ -121,11 +127,14 @@ class GutterRendererChunkLines(GtkSource.GutterRendererText):
         # align correctly.
         height += 1
 
+        fill_colors, line_colors = self._chunk_colours()
+
         if chunk and chunk[1] != chunk[2]:
             if self.props.view.current_chunk_check(chunk):
-                background_rgba = self.chunk_highlights[chunk[0]]
+                alpha = fill_colors["current-chunk-highlight"].alpha
+                background_rgba = alpha_tint(fill_colors[chunk[0]], alpha)
             else:
-                background_rgba = self.fill_colors[chunk[0]]
+                background_rgba = fill_colors[chunk[0]]
 
             rect = Graphene.Rect()
             rect.init(x, y + 1, width, height)
@@ -149,7 +158,7 @@ class GutterRendererChunkLines(GtkSource.GutterRendererText):
                 path_builder.rel_line_to(width, 0)
 
             path = path_builder.to_path()
-            snapshot.append_stroke(path, Gsk.Stroke(1.0), self.line_colors[chunk[0]])
+            snapshot.append_stroke(path, Gsk.Stroke(1.0), line_colors[chunk[0]])
 
         return GtkSource.GutterRendererText.do_snapshot_line(
             self, snapshot, lines, line

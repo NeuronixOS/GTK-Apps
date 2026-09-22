@@ -36,7 +36,22 @@ pub fn build_terminal(config: &Config) -> vte4::Terminal {
 
 /// Like [`build_terminal`], spawning the shell in `cwd` when given.
 pub fn build_terminal_in(config: &Config, cwd: Option<&Path>) -> vte4::Terminal {
+    build_terminal_with_command(config, cwd, None)
+}
+
+/// Spawn `command` (for example `btop`) instead of the login shell.
+pub fn build_terminal_with_command(
+    config: &Config,
+    cwd: Option<&Path>,
+    command: Option<&[String]>,
+) -> vte4::Terminal {
     let terminal = vte4::Terminal::new();
+    terminal.set_hexpand(true);
+    terminal.set_vexpand(true);
+    terminal.set_can_focus(true);
+    terminal.set_focusable(true);
+    terminal.set_input_enabled(true);
+    terminal.set_bold_is_bright(true);
     apply_settings(&terminal, config);
 
     let palette = config.palette_rgba();
@@ -48,7 +63,7 @@ pub fn build_terminal_in(config: &Config, cwd: Option<&Path>) -> vte4::Terminal 
     );
 
     register_url_patterns(&terminal);
-    spawn_shell(&terminal, cwd);
+    spawn_process(&terminal, cwd, command);
     terminal
 }
 
@@ -128,8 +143,14 @@ fn register_url_patterns(terminal: &vte4::Terminal) {
     }
 }
 
-fn spawn_shell(terminal: &vte4::Terminal, cwd: Option<&Path>) {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+fn spawn_process(terminal: &vte4::Terminal, cwd: Option<&Path>, command: Option<&[String]>) {
+    let argv: Vec<String> = match command {
+        Some(cmd) if !cmd.is_empty() => cmd.to_vec(),
+        _ => {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+            vec![shell, "-i".into()]
+        }
+    };
     let dir = cwd
         .filter(|p| p.is_dir())
         .map(|p| p.to_string_lossy().into_owned())
@@ -141,22 +162,43 @@ fn spawn_shell(terminal: &vte4::Terminal, cwd: Option<&Path>) {
         })
         .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".to_string()));
 
-    let argv = [shell.as_str()];
-    let envv: &[&str] = &[];
+    // Interactive so bash/zsh print PS1. An empty envv is NOT “inherit” in VTE —
+    // it is a blank environment, which starts a non-interactive shell with no prompt.
+    let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
 
+    let mut env_owned: Vec<String> = std::env::vars()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    upsert_env(&mut env_owned, "TERM", "xterm-256color");
+    upsert_env(&mut env_owned, "COLORTERM", "truecolor");
+    env_owned.retain(|e| !e.eq_ignore_ascii_case("NO_COLOR") && !e.starts_with("NO_COLOR="));
+    let env_refs: Vec<&str> = env_owned.iter().map(String::as_str).collect();
+
+    let term = terminal.clone();
     terminal.spawn_async(
         vte4::PtyFlags::DEFAULT,
         Some(&dir),
-        &argv,
-        envv,
+        &argv_refs,
+        &env_refs,
         glib::SpawnFlags::DEFAULT,
         || {},
         -1,
         gio::Cancellable::NONE,
         move |result| {
             if let Err(err) = result {
-                eprintln!("gtk-term: failed to spawn shell: {err}");
+                let msg = format!("gtk-term: failed to spawn shell: {err}\r\n");
+                eprintln!("{}", msg.trim_end());
+                term.feed(msg.as_bytes());
             }
         },
     );
+}
+
+fn upsert_env(env: &mut Vec<String>, key: &str, value: &str) {
+    let prefix = format!("{key}=");
+    if let Some(entry) = env.iter_mut().find(|e| e.starts_with(&prefix)) {
+        *entry = format!("{prefix}{value}");
+    } else {
+        env.push(format!("{prefix}{value}"));
+    }
 }

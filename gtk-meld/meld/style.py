@@ -224,18 +224,30 @@ def _ensure_suite_chunk_colours() -> bool:
         return _suite_fill_colours is not None
 
 
-def get_common_theme() -> Tuple[ColourMap, ColourMap]:
+def _swap_insert_delete(fill: dict[str, Gdk.RGBA], line: dict[str, Gdk.RGBA]) -> Tuple[ColourMap, ColourMap]:
+    fill = dict(fill)
+    line = dict(line)
+    fill["insert"], fill["delete"] = fill["delete"], fill["insert"]
+    if "insert" in line and "delete" in line:
+        line["insert"], line["delete"] = line["delete"], line["insert"]
+    return fill, line
+
+
+def get_common_theme(*, swap_insert_delete: bool = False) -> Tuple[ColourMap, ColourMap]:
     # Always refresh from the suite Profile so gutters/chunks never keep
     # stock Meld purple/blue after a Profile change (or a missed startup hook).
     _ensure_suite_chunk_colours()
 
     if _suite_fill_colours is not None and _suite_line_colours is not None:
-        return _suite_fill_colours, _suite_line_colours
+        fill_colours, line_colours = _suite_fill_colours, _suite_line_colours
+        if swap_insert_delete:
+            return _swap_insert_delete(fill_colours, line_colours)
+        return fill_colours, line_colours
 
     lookup = colour_lookup_with_fallback
     fill_colours = {
         "insert": lookup("meld:insert", "background"),
-        "delete": lookup("meld:insert", "background"),
+        "delete": lookup("meld:delete", "background"),
         "conflict": lookup("meld:conflict", "background"),
         "replace": lookup("meld:replace", "background"),
         "error": lookup("meld:error", "background"),
@@ -245,9 +257,11 @@ def get_common_theme() -> Tuple[ColourMap, ColourMap]:
     }
     line_colours = {
         "insert": lookup("meld:insert", "line-background"),
-        "delete": lookup("meld:insert", "line-background"),
+        "delete": lookup("meld:delete", "line-background"),
         "conflict": lookup("meld:conflict", "line-background"),
         "replace": lookup("meld:replace", "line-background"),
         "error": lookup("meld:error", "line-background"),
     }
+    if swap_insert_delete:
+        return _swap_insert_delete(fill_colours, line_colours)
     return fill_colours, line_colours
