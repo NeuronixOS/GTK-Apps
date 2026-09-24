@@ -578,65 +578,8 @@ fn spawn_install(
     }
 }
 
-/// Same visual language as `/usr/share/neuronix/neuronix_choice_dialog.py`
-/// (Neuronix Settings hub — large card buttons).
-const NEURONIX_CHOICE_CSS: &str = r#"
-window.neuronix-choice {
-  background-color: #2e2e2e;
-  color: #f5f5f5;
-  border-radius: 12px;
-}
-box.neuronix-root {
-  background-color: #2e2e2e;
-}
-label.neuronix-title {
-  color: #f5f5f5;
-  font-size: 22px;
-  font-weight: 700;
-}
-label.neuronix-subtitle {
-  color: #b0b0b0;
-  font-size: 13px;
-}
-button.neuronix-card {
-  background-color: #3a3a3a;
-  background-image: none;
-  border: none;
-  border-radius: 10px;
-  box-shadow: none;
-  outline: none;
-  padding: 14px 18px;
-  margin: 0;
-  min-height: 56px;
-}
-button.neuronix-card:hover {
-  background-color: #4a4a4a;
-}
-button.neuronix-card label.neuronix-row-title {
-  color: #f5f5f5;
-  font-size: 15px;
-  font-weight: 600;
-}
-button.neuronix-card label.neuronix-row-desc {
-  color: #a8a8a8;
-  font-size: 12px;
-}
-button.neuronix-close {
-  background-color: #3a3a3a;
-  background-image: none;
-  color: #f5f5f5;
-  border: none;
-  border-radius: 8px;
-  padding: 10px 20px;
-  font-size: 13px;
-  min-width: 88px;
-}
-button.neuronix-close:hover {
-  background-color: #4a4a4a;
-}
-"#;
-
-/// Role picker matching Neuronix Settings (`neuronix_choice_dialog`) card buttons.
+/// Role picker matching Neuronix Settings card buttons, colored from the
+/// active gtk-theme profile (not the old hardcoded greys).
 fn show_setup_role_dialog(
     parent: &impl IsA<gtk::Window>,
     script: PathBuf,
@@ -652,9 +595,11 @@ fn show_setup_role_dialog(
         .default_height(340)
         .build();
     dialog.add_css_class("neuronix-choice");
+    gtk_theme::style_dialog(&dialog);
 
     let provider = gtk::CssProvider::new();
-    provider.load_from_data(NEURONIX_CHOICE_CSS);
+    let css = gtk_theme::choice_dialog_css();
+    provider.load_from_data(&css);
     gtk::style_context_add_provider_for_display(
         &gtk::gdk::Display::default().expect("display"),
         &provider,

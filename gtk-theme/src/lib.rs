@@ -1707,6 +1707,80 @@ pub fn style_dialog(window: &impl IsA<gtk::Widget>) {
     window.add_css_class("gtk-dialog");
 }
 
+/// CSS for Neuronix card-choice dialogs (Setup Sync, Settings hub).
+///
+/// Hard-coded `#2e2e2e` greys ignore the suite profile; this uses the same
+/// Night Owl / custom surfaces as gtk-files so the picker matches the app.
+pub fn choice_dialog_css() -> String {
+    let p = load_profile();
+    let bg = p.background;
+    let fg = p.foreground;
+    let surface = p.surface_hex();
+    let tile = p.surface_alt_hex();
+    let accent = p.accent();
+    let muted = mix_hex(fg, bg, 0.40);
+    let hover = mix_hex(bg, fg, 0.26);
+    format!(
+        r#"
+window.neuronix-choice {{
+  background-color: {bg};
+  color: {fg};
+  border-radius: 12px;
+}}
+box.neuronix-root {{
+  background-color: {bg};
+}}
+label.neuronix-title {{
+  color: {fg};
+  font-size: 22px;
+  font-weight: 700;
+}}
+label.neuronix-subtitle {{
+  color: {muted};
+  font-size: 13px;
+}}
+button.neuronix-card {{
+  background-color: {tile};
+  background-image: none;
+  border: 1px solid {surface};
+  border-radius: 10px;
+  box-shadow: none;
+  outline: none;
+  padding: 14px 18px;
+  margin: 0;
+  min-height: 56px;
+}}
+button.neuronix-card:hover {{
+  background-color: {hover};
+  border-color: {accent};
+}}
+button.neuronix-card label.neuronix-row-title {{
+  color: {fg};
+  font-size: 15px;
+  font-weight: 600;
+}}
+button.neuronix-card label.neuronix-row-desc {{
+  color: {muted};
+  font-size: 12px;
+}}
+button.neuronix-close {{
+  background-color: {tile};
+  background-image: none;
+  color: {fg};
+  border: 1px solid {surface};
+  border-radius: 8px;
+  padding: 10px 20px;
+  font-size: 13px;
+  min-width: 88px;
+}}
+button.neuronix-close:hover {{
+  background-color: {hover};
+  border-color: {accent};
+}}
+"#
+    )
+}
+
 /// Present an in-app file chooser that follows the suite theme.
 ///
 /// GTK’s portal-backed [`gtk::FileDialog`] is drawn by the desktop and ignores
