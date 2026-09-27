@@ -26,7 +26,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 PYVER="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 THEME=""
-for cand in "$ROOT/../../gtk-theme/python" "$ROOT/../gtk-theme/python"; do
+for cand in "$ROOT/../../python" "$ROOT/../../gtk-theme/python" "$ROOT/../gtk-theme/python" \
+            /usr/share/neuronix/gtk-theme/python; do
   if [[ -f "$cand/gtk_theme.py" ]]; then
     THEME="$cand"
     break

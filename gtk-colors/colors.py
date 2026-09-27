@@ -14,9 +14,36 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
 from gi.repository import Gdk, GLib, Gtk
 
-_THEME_PY = Path(__file__).resolve().parent.parent / "gtk-theme" / "python"
-if str(_THEME_PY) not in sys.path:
-    sys.path.insert(0, str(_THEME_PY))
+def _ensure_gtk_theme_on_path() -> None:
+    """Source tree is ``GTK-Apps/gtk-colors``; install is ``…/gtk-apps/apps/gtk-colors``."""
+    here = Path(__file__).resolve().parent
+    cands: list[Path] = []
+    p = here
+    for _ in range(8):
+        cands.append(p / "python")
+        cands.append(p / "gtk-theme" / "python")
+        if p.parent == p:
+            break
+        p = p.parent
+    cands.extend(
+        (
+            Path("/usr/local/lib/neuronix/gtk-apps/gtk-theme/python"),
+            Path("/usr/local/lib/neuronix/gtk-apps/python"),
+            Path("/usr/share/neuronix/gtk-theme/python"),
+        )
+    )
+    for d in cands:
+        try:
+            if (d / "gtk_theme.py").is_file():
+                s = str(d)
+                if s not in sys.path:
+                    sys.path.insert(0, s)
+                return
+        except OSError:
+            continue
+
+
+_ensure_gtk_theme_on_path()
 import gtk_theme  # noqa: E402
 
 APP_ID = "org.neuronix.GtkColors"

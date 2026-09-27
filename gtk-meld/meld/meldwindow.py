@@ -38,17 +38,29 @@ def _load_gtk_theme():
         pass
 
     here = Path(__file__).resolve()
-    candidates = [
-        # Source: GTK-Apps/gtk-meld/meld/meldwindow.py → GTK-Apps/gtk-theme/python
-        here.parents[2] / "gtk-theme" / "python",
-        # target install: …/gtk-meld/target/lib/pythonX/site-packages/meld/…
-        here.parents[6] / "gtk-theme" / "python",
-    ]
-    for path in candidates:
-        if (path / "gtk_theme.py").is_file() or (path / "__init__.py").is_file():
-            if str(path) not in sys.path:
-                sys.path.insert(0, str(path))
+    cands: list[Path] = []
+    p = here.parent
+    for _ in range(8):
+        cands.append(p / "python")
+        cands.append(p / "gtk-theme" / "python")
+        if p.parent == p:
             break
+        p = p.parent
+    cands.extend(
+        (
+            Path("/usr/local/lib/neuronix/gtk-apps/python"),
+            Path("/usr/local/lib/neuronix/gtk-apps/gtk-theme/python"),
+            Path("/usr/share/neuronix/gtk-theme/python"),
+        )
+    )
+    for path in cands:
+        try:
+            if (path / "gtk_theme.py").is_file() or (path / "__init__.py").is_file():
+                if str(path) not in sys.path:
+                    sys.path.insert(0, str(path))
+                break
+        except OSError:
+            continue
     import gtk_theme
 
     return gtk_theme

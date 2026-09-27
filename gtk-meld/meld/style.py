@@ -207,13 +207,28 @@ def _ensure_suite_chunk_colours() -> bool:
 
         # Ensure gtk-theme is importable from a target/ install.
         here = Path(__file__).resolve()
-        for rel in (
-            here.parents[2] / "gtk-theme" / "python",  # source: …/gtk-meld/meld
-            here.parents[6] / "gtk-theme" / "python",  # target: …/gtk-meld/target/lib/…/meld
-        ):
-            if (rel / "gtk_theme.py").is_file() and str(rel) not in sys.path:
-                sys.path.insert(0, str(rel))
+        cands: list[Path] = []
+        p = here.parent
+        for _ in range(8):
+            cands.append(p / "python")
+            cands.append(p / "gtk-theme" / "python")
+            if p.parent == p:
                 break
+            p = p.parent
+        cands.extend(
+            (
+                Path("/usr/local/lib/neuronix/gtk-apps/python"),
+                Path("/usr/local/lib/neuronix/gtk-apps/gtk-theme/python"),
+                Path("/usr/share/neuronix/gtk-theme/python"),
+            )
+        )
+        for rel in cands:
+            try:
+                if (rel / "gtk_theme.py").is_file() and str(rel) not in sys.path:
+                    sys.path.insert(0, str(rel))
+                    break
+            except OSError:
+                continue
 
         import gtk_theme
 

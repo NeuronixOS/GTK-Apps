@@ -473,6 +473,16 @@ fn load_css() {
         .file-row-content.git-conflict label {
             color: #dc2626;
         }
+        window row:selected label,
+        window listbox > row:selected label,
+        window .navigation-sidebar > row:selected,
+        window .navigation-sidebar > row:selected *,
+        window .navigation-sidebar > row:selected label,
+        window .navigation-sidebar > row:selected image,
+        columnview row:selected,
+        columnview row:selected * {
+            color: @theme_selected_fg_color;
+        }
         ",
     );
     if let Some(display) = gtk::gdk::Display::default() {

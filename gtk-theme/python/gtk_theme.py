@@ -22,6 +22,27 @@ from typing import Callable, Optional
 
 _PROFILES_PATH = Path(__file__).resolve().parent.parent / "profiles.json"
 _DEFAULT_ID = "gruvbox-dark"
+
+
+def _profiles_json_path() -> Path:
+    """``profiles.json`` lives next to ``gtk-theme/``, not the flattened ``python/`` copy."""
+    here = Path(__file__).resolve().parent
+    cands = (
+        here.parent / "profiles.json",
+        here / "profiles.json",
+        Path("/usr/local/lib/neuronix/gtk-apps/gtk-theme/profiles.json"),
+        Path("/usr/share/neuronix/gtk-theme/profiles.json"),
+        Path("/usr/local/lib/neuronix/gtk-apps/profiles.json"),
+    )
+    for path in cands:
+        try:
+            if path.is_file():
+                return path
+        except OSError:
+            continue
+    return cands[0]
+
+
 _THEME_DIR = Path.home() / ".config" / "gtk-apps"
 _THEME_PATH = _THEME_DIR / "theme.toml"
 _CUSTOM_PROFILES_PATH = _THEME_DIR / "custom-profiles.json"
@@ -221,7 +242,7 @@ def _parse_stops(raw: object) -> Optional[tuple[str, str]]:
 def builtin_profiles() -> list[Profile]:
     global _profiles
     if _profiles is None:
-        data = json.loads(_PROFILES_PATH.read_text(encoding="utf-8"))
+        data = json.loads(_profiles_json_path().read_text(encoding="utf-8"))
         _profiles = [
             Profile(
                 id=p["id"],
@@ -388,6 +409,14 @@ window, window.csd, window.solid-csd {{
   color: {fg};
 }}
 window label, window .title {{ color: {fg}; }}
+window row:selected label,
+window listbox > row:selected label,
+window .navigation-sidebar > row:selected,
+window .navigation-sidebar > row:selected *,
+window .navigation-sidebar > row:selected label,
+window .navigation-sidebar > row:selected image {{
+  color: {on_accent};
+}}
 
 headerbar, headerbar.default-decoration, headerbar:backdrop,
 .titlebar, .titlebar:backdrop,
@@ -565,8 +594,14 @@ listbox row:selected,
 listbox.side-panel row:selected,
 .side-panel listbox row:selected,
 .navigation-sidebar > row:selected {{
-  background-color: alpha({accent}, 0.35);
-  color: {fg};
+  background-color: {accent};
+  color: {on_accent};
+}}
+listbox row:selected *,
+.navigation-sidebar > row:selected *,
+.navigation-sidebar > row:selected label,
+.navigation-sidebar > row:selected image {{
+  color: {on_accent};
 }}
 notebook, notebook > stack {{ background-color: {bg}; color: {fg}; }}
 notebook > header {{ background-color: {surface}; color: {fg}; }}
@@ -1113,90 +1148,12 @@ def _hyprctl_dispatch(name: str, args: str) -> None:
         pass
 
 
-def _hyprnine_active() -> bool:
-    if not shutil.which("hyprctl"):
-        return False
-    try:
-        out = subprocess.run(
-            ["hyprctl", "plugin", "list"],
-            env=_hypr_env(),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            timeout=5,
-            text=True,
-        )
-    except Exception:
-        return False
-    return "plugin hyprnine" in (out.stdout or "").lower()
-
-
-def _ensure_hyprnine_loaded() -> bool:
-    if _hyprnine_active():
-        return True
-    for so in (
-        "/usr/local/lib/hyprland/plugins/libhyprnine.so",
-        "/usr/lib/x86_64-linux-gnu/hyprland/plugins/libhyprnine.so",
-    ):
-        if not Path(so).is_file():
-            continue
-        try:
-            subprocess.run(
-                ["hyprctl", "plugin", "load", so],
-                env=_hypr_env(),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=8,
-            )
-        except Exception:
-            continue
-        if _hyprnine_active():
-            return True
-    return False
-
-
 def _active_ninepatch_path() -> Path:
     return _THEME_DIR / "chrome" / "border-9.png"
 
 
-def _sync_hypr_ninepatch(chrome: WindowChrome) -> None:
-    dest = _active_ninepatch_path()
-    src = None
-    if chrome.ninepatch:
-        candidate = Path(chrome.ninepatch).expanduser()
-        if candidate.is_file():
-            src = candidate
-    if src is not None:
-        try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest)
-            alt = Path.home() / "configs" / "gtk-apps" / "chrome" / "border-9.png"
-            if alt != dest:
-                alt.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, alt)
-        except OSError:
-            return
-        if _theme_session_safe():
-            return
-        if not _ensure_hyprnine_loaded():
-            return
-        _hyprctl_dispatch("hyprninepatch", str(dest))
-        _hyprctl_keyword("general:border_size", "0")
-        return
-    try:
-        dest.unlink(missing_ok=True)
-        (Path.home() / "configs" / "gtk-apps" / "chrome" / "border-9.png").unlink(
-            missing_ok=True
-        )
-    except OSError:
-        pass
-    if _theme_session_safe():
-        return
-    if _hyprnine_active():
-        _hyprctl_dispatch("hyprninepatch", "off")
+def _sync_hypr_ninepatch(_chrome: WindowChrome) -> None:
+    return
 
 
 def _hyprctl_hyprbarsgradient(args: str) -> None:
@@ -1544,6 +1501,23 @@ treeview header button {{
   border-color: {border};
 }}
 label, .label {{ color: {fg}; }}
+/* Child labels ignore row :selected color; force ink on the accent chip. */
+*:selected, *:selected *,
+row:selected, row:selected *,
+list row:selected, list row:selected *,
+listview > row:selected, listview > row:selected *,
+gridview > child:selected, gridview > child:selected *,
+columnview row:selected, columnview row:selected *,
+treeview:selected, treeview:selected *,
+treeview.view:selected, treeview.view:selected *,
+.view:selected, .view:selected *,
+.content-view:selected, .content-view:selected *,
+placessidebar row:selected, placessidebar row:selected *,
+.sidebar row:selected, .sidebar row:selected *,
+menuitem:hover, menuitem:hover *,
+modelbutton:hover, modelbutton:hover * {{
+  color: {on_accent};
+}}
 separator {{ background-color: {border}; }}
 scale trough {{
   background-color: {border};
@@ -1771,6 +1745,14 @@ window.filechooser button.suggested-action {{
   background-color: {accent};
   color: {on_accent};
 }}
+*:selected, *:selected *,
+row:selected, row:selected *,
+listview > row:selected, listview > row:selected *,
+gridview > child:selected, gridview > child:selected *,
+columnview row:selected, columnview row:selected *,
+.view:selected, .view:selected * {{
+  color: {on_accent};
+}}
 {_GTK_USER_CSS_END}
 """
 
@@ -1895,7 +1877,11 @@ checkbutton > check:checked, radiobutton > radio:checked {{
   border-color: {accent};
   color: {on_accent};
 }}
-.view:selected, listview > row:selected, gridview > child:selected {{
+.view:selected, .view:selected *,
+listview > row:selected, listview > row:selected *,
+gridview > child:selected, gridview > child:selected *,
+columnview row:selected, columnview row:selected *,
+row:selected, row:selected * {{
   background-color: {accent};
   color: {on_accent};
 }}
@@ -2395,7 +2381,7 @@ def _sync_waybar_style(
             out = _rewrite_css_block(
                 out,
                 "#workspaces button.active",
-                "  color: @wb_fg;\n  background: @wb_surface;",
+                "  color: @wb_bg;\n  background: @wb_fg;",
             )
             out = _promote_waybar_hardcoded_to_vars(out)
             out = _waybar_gtk_color_refs(out)
@@ -2667,10 +2653,7 @@ def _sync_hypr_window_geometry(border_size: int, rounding: int) -> None:
 
 
 def install_chrome_ninepatch(profile_id: str, src: str | Path) -> Optional[Path]:
-    """Copy a 9-slice PNG into ``~/.config/gtk-apps/chrome/<id>/border-9.png``.
-
-    Apply-to-suite loads this file in the hyprnine compositor plugin.
-    """
+    """Copy a 9-slice PNG into ``~/.config/gtk-apps/chrome/<id>/border-9.png``."""
     ident = (profile_id or "").strip()
     src_path = Path(src)
     if not ident or not src_path.is_file():

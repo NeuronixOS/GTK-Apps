@@ -17,14 +17,33 @@ APP_DIR = Path(__file__).resolve().parent
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
-_THEME_CANDIDATES = [
-    APP_DIR.parent / "gtk-theme" / "python",
-    Path("/usr/share/neuronix/gtk-theme/python"),
-]
-for cand in _THEME_CANDIDATES:
-    if cand.is_dir() and str(cand) not in sys.path:
-        sys.path.insert(0, str(cand))
-        break
+
+def _ensure_gtk_theme_on_path() -> None:
+    cands: list[Path] = []
+    p = APP_DIR
+    for _ in range(8):
+        cands.append(p / "python")
+        cands.append(p / "gtk-theme" / "python")
+        if p.parent == p:
+            break
+        p = p.parent
+    cands.extend(
+        (
+            Path("/usr/local/lib/neuronix/gtk-apps/python"),
+            Path("/usr/local/lib/neuronix/gtk-apps/gtk-theme/python"),
+            Path("/usr/share/neuronix/gtk-theme/python"),
+        )
+    )
+    for cand in cands:
+        try:
+            if (cand / "gtk_theme.py").is_file() and str(cand) not in sys.path:
+                sys.path.insert(0, str(cand))
+                return
+        except OSError:
+            continue
+
+
+_ensure_gtk_theme_on_path()
 
 from lib.root import add_root_arg, resolve_root  # noqa: E402
 from lib.store import ConfigStore  # noqa: E402

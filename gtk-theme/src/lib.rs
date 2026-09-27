@@ -314,7 +314,7 @@ pub struct WindowChrome {
     pub bar_inactive: Option<Vec<String>>,
     #[serde(default)]
     pub buttons: ChromeButtons,
-    /// PNG 9-slice painted on real windows by the hyprnine compositor plugin.
+    /// Optional 9-slice PNG path (unused; kept for profile compatibility).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ninepatch: Option<String>,
 }
@@ -822,6 +822,14 @@ window, window.csd, window.solid-csd {{
 window label, window .title {{
   color: {fg};
 }}
+window row:selected label,
+window listbox > row:selected label,
+window .navigation-sidebar > row:selected,
+window .navigation-sidebar > row:selected *,
+window .navigation-sidebar > row:selected label,
+window .navigation-sidebar > row:selected image {{
+  color: {on_accent};
+}}
 
 /* ---- header / menu / toolbar bars ----
  * Adwaita-dark paints headerbars with `background` + gradient / image layers.
@@ -1058,9 +1066,14 @@ textview.gtk-edit-view text selection {{
   background-image: none;
 }}
 .navigation-sidebar > row:selected {{
-  background-color: alpha({accent}, 0.35);
+  background-color: {accent};
   background-image: none;
-  color: {fg};
+  color: {on_accent};
+}}
+.navigation-sidebar > row:selected *,
+.navigation-sidebar > row:selected label,
+.navigation-sidebar > row:selected image {{
+  color: {on_accent};
 }}
 
 /* Opt-in content surfaces (apps add these classes) — kills leftover Adwaita grey */
@@ -1100,9 +1113,13 @@ listbox.side-panel row:hover,
 }}
 listbox.side-panel row:selected,
 .side-panel listbox row:selected {{
-  background-color: alpha({accent}, 0.35);
+  background-color: {accent};
   background-image: none;
-  color: {fg};
+  color: {on_accent};
+}}
+listbox.side-panel row:selected *,
+.side-panel listbox row:selected * {{
+  color: {on_accent};
 }}
 
 /* SourceView / TextView — profile bg + softened editor fg on dark themes */
@@ -2597,44 +2614,6 @@ pub fn hyprbars_active() -> bool {
         .contains("plugin hyprbars")
 }
 
-/// True when the hyprnine 9-slice plugin is loaded.
-pub fn hyprnine_active() -> bool {
-    if hypr_instance_signature().is_none() {
-        return false;
-    }
-    let Ok(out) = hyprctl_cmd()
-        .args(["plugin", "list"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-    else {
-        return false;
-    };
-    String::from_utf8_lossy(&out.stdout)
-        .to_ascii_lowercase()
-        .contains("plugin hyprnine")
-}
-
-fn ensure_hyprnine_loaded() -> bool {
-    if hyprnine_active() {
-        return true;
-    }
-    for so in [
-        "/usr/local/lib/hyprland/plugins/libhyprnine.so",
-        "/usr/lib/x86_64-linux-gnu/hyprland/plugins/libhyprnine.so",
-    ] {
-        if !Path::new(so).is_file() {
-            continue;
-        }
-        let _ = hyprctl_quiet(hyprctl_cmd().args(["plugin", "load", so])).status();
-        if hyprnine_active() {
-            return true;
-        }
-    }
-    false
-}
-
 /// Prefer hiding GTK headerbar close/min/max when hyprbars owns those controls.
 pub fn headerbar_show_title_buttons() -> bool {
     !hyprbars_active()
@@ -2768,7 +2747,6 @@ fn preview_hyprbars_fill(data: &ProfileData, chrome: &WindowChrome) {
 }
 
 /// Copy a 9-slice PNG into `~/.config/gtk-apps/chrome/<id>/border-9.png`.
-/// Apply-to-suite then loads it in the hyprnine compositor plugin.
 pub fn install_chrome_ninepatch(profile_id: &str, src: &Path) -> Option<PathBuf> {
     let id = profile_id.trim();
     if id.is_empty() || !src.is_file() {
@@ -2781,58 +2759,7 @@ pub fn install_chrome_ninepatch(profile_id: &str, src: &Path) -> Option<PathBuf>
     Some(dest)
 }
 
-fn active_ninepatch_path() -> PathBuf {
-    theme_dir().join("chrome").join("border-9.png")
-}
-
-fn sync_hypr_ninepatch(chrome: &WindowChrome) {
-    let dest = active_ninepatch_path();
-    let src = chrome
-        .ninepatch
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-        .filter(|p| p.is_file());
-
-    if let Some(src) = src {
-        if let Some(parent) = dest.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::copy(&src, &dest);
-        if let Some(home) = dirs::home_dir() {
-            let alt = home.join("configs/gtk-apps/chrome/border-9.png");
-            if alt != dest {
-                if let Some(parent) = alt.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let _ = std::fs::copy(&src, &alt);
-            }
-        }
-        if theme_session_safe() {
-            return;
-        }
-        if !ensure_hyprnine_loaded() {
-            return;
-        }
-        if let Some(path) = dest.to_str() {
-            hyprctl_dispatch("hyprninepatch", path);
-        }
-        hyprctl_keyword("general:border_size", "0");
-        return;
-    }
-
-    let _ = std::fs::remove_file(&dest);
-    if let Some(home) = dirs::home_dir() {
-        let _ = std::fs::remove_file(home.join("configs/gtk-apps/chrome/border-9.png"));
-    }
-    if theme_session_safe() {
-        return;
-    }
-    if hyprnine_active() {
-        hyprctl_dispatch("hyprninepatch", "off");
-    }
-}
+fn sync_hypr_ninepatch(_chrome: &WindowChrome) {}
 
 fn config_candidates(rel: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -3503,6 +3430,23 @@ treeview header button {{
   border-color: {border};
 }}
 label, .label {{ color: {fg}; }}
+/* Child labels ignore row :selected color; force ink on the accent chip. */
+*:selected, *:selected *,
+row:selected, row:selected *,
+list row:selected, list row:selected *,
+listview > row:selected, listview > row:selected *,
+gridview > child:selected, gridview > child:selected *,
+columnview row:selected, columnview row:selected *,
+treeview:selected, treeview:selected *,
+treeview.view:selected, treeview.view:selected *,
+.view:selected, .view:selected *,
+.content-view:selected, .content-view:selected *,
+placessidebar row:selected, placessidebar row:selected *,
+.sidebar row:selected, .sidebar row:selected *,
+menuitem:hover, menuitem:hover *,
+modelbutton:hover, modelbutton:hover * {{
+  color: {on_accent};
+}}
 separator {{ background-color: {border}; }}
 scale trough {{
   background-color: {border};
@@ -3933,7 +3877,11 @@ checkbutton > check:checked, radiobutton > radio:checked {{
   border-color: {accent};
   color: {on_accent};
 }}
-.view:selected, listview > row:selected, gridview > child:selected {{
+.view:selected, .view:selected *,
+listview > row:selected, listview > row:selected *,
+gridview > child:selected, gridview > child:selected *,
+columnview row:selected, columnview row:selected *,
+row:selected, row:selected * {{
   background-color: {accent};
   color: {on_accent};
 }}
@@ -4154,6 +4102,14 @@ window.messagedialog button.suggested-action,
 window.dialog button.suggested-action,
 window.filechooser button.suggested-action {{
   background-color: {accent};
+  color: {on_accent};
+}}
+*:selected, *:selected *,
+row:selected, row:selected *,
+listview > row:selected, listview > row:selected *,
+gridview > child:selected, gridview > child:selected *,
+columnview row:selected, columnview row:selected *,
+.view:selected, .view:selected * {{
   color: {on_accent};
 }}
 {GTK_USER_CSS_END}
