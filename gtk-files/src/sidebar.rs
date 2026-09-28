@@ -3,6 +3,8 @@
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gtk4 as gtk;
@@ -116,6 +118,7 @@ impl Sidebar {
         });
 
         sb.rebuild();
+        schedule_gvfs_probe(Rc::clone(&sb));
 
         // Pick up gtk-sync server/client after install without restarting gtk-files.
         {
@@ -451,8 +454,12 @@ impl Sidebar {
             }
 
             // Network section is always shown: connect action + live mounts + ~/Network.
-            crate::network::sync_home_shortcuts();
-            let net_mounts = crate::network::network_mounts();
+            let net_mounts = if volume_monitor_safe() {
+                crate::network::sync_home_shortcuts();
+                crate::network::network_mounts()
+            } else {
+                Vec::new()
+            };
             let network_home = crate::network::network_home_dir();
             self.list.append(&make_header("Network"));
             {
@@ -687,20 +694,21 @@ impl Sidebar {
         }
 
         for mount in user_mounted_drives() {
-            let path = mount
-                .root()
-                .path()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| mount.root().uri().to_string());
-            parts.push(format!("d:{}:{path}", mount_display_name(&mount)));
+            parts.push(format!(
+                "d:{}:{}",
+                mount_display_name(&mount),
+                mount_safe_id(&mount)
+            ));
         }
         for vol in unmounted_volumes() {
             parts.push(format!("u:{}", vol.name()));
         }
 
-        crate::network::sync_home_shortcuts();
-        for mount in crate::network::network_mounts() {
-            parts.push(format!("n:{}:{}", mount.name(), mount.root().uri()));
+        if volume_monitor_safe() {
+            crate::network::sync_home_shortcuts();
+            for mount in crate::network::network_mounts() {
+                parts.push(format!("n:{}:{}", mount.name(), mount_safe_id(&mount)));
+            }
         }
         let network_home = crate::network::network_home_dir();
         if network_home.is_dir() {
@@ -743,14 +751,99 @@ impl Sidebar {
     }
 }
 
-/// GVFS phone / camera / portable-device schemes (USB MTP, PTP/gphoto, iOS AFC).
 const DEVICE_SCHEMES: &[&str] = &["mtp", "gphoto", "gphoto2", "afc"];
+
+thread_local! {
+    /// `None` until a background `stat` of `/run/user/…/gvfs` finishes. While
+    /// unknown or stuck, skip `VolumeMonitor::mounts()` so a wedged GVFS FUSE
+    /// cannot block the UI on `request_wait_answer`.
+    static GVFS_MONITOR_OK: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+fn volume_monitor_safe() -> bool {
+    GVFS_MONITOR_OK.with(|c| c.get() == Some(true))
+}
+
+fn probe_gvfs_fuse_responsive() -> bool {
+    let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into());
+    let gvfs = format!("{runtime}/gvfs");
+    match std::process::Command::new("timeout")
+        .args(["0.4", "stat", "-t", &gvfs])
+        .status()
+    {
+        // 124 = timeout(1) killed stat — FUSE is wedged.
+        Ok(st) => st.code() != Some(124),
+        Err(_) => true,
+    }
+}
+
+fn schedule_gvfs_probe(sidebar: Rc<Sidebar>) {
+    let done = Arc::new(AtomicBool::new(false));
+    let ok = Arc::new(AtomicBool::new(false));
+    {
+        let done = Arc::clone(&done);
+        let ok = Arc::clone(&ok);
+        std::thread::Builder::new()
+            .name("gtk-files-gvfs-probe".into())
+            .spawn(move || {
+                ok.store(probe_gvfs_fuse_responsive(), Ordering::SeqCst);
+                done.store(true, Ordering::SeqCst);
+            })
+            .ok();
+    }
+    let started = Instant::now();
+    glib::timeout_add_local(Duration::from_millis(50), move || {
+        if !done.load(Ordering::SeqCst) {
+            if started.elapsed() > Duration::from_secs(2) {
+                GVFS_MONITOR_OK.with(|c| c.set(Some(false)));
+                return glib::ControlFlow::Break;
+            }
+            return glib::ControlFlow::Continue;
+        }
+        let responsive = ok.load(Ordering::SeqCst);
+        GVFS_MONITOR_OK.with(|c| c.set(Some(responsive)));
+        if responsive {
+            sidebar.rebuild();
+        }
+        glib::ControlFlow::Break
+    });
+}
+
+fn mount_root_uri(mount: &gio::Mount) -> String {
+    mount.root().uri().to_string()
+}
+
+fn mount_uri_is_gvfs(uri: &str) -> bool {
+    let u = uri.to_ascii_lowercase();
+    u.contains("/gvfs/")
+        || u.contains("gvfsd-fuse")
+        || DEVICE_SCHEMES.iter().any(|s| u.starts_with(&format!("{s}:")))
+        || crate::network::uri_is_network_scheme(&u)
+}
+
+/// Local path only when it will not touch a stuck FUSE mount.
+fn mount_safe_local_path(mount: &gio::Mount) -> Option<PathBuf> {
+    let uri = mount_root_uri(mount);
+    if !uri.starts_with("file://") || mount_uri_is_gvfs(&uri) {
+        return None;
+    }
+    mount.root().path()
+}
+
+fn mount_safe_id(mount: &gio::Mount) -> String {
+    mount_safe_local_path(mount)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| mount_root_uri(mount))
+}
 
 /// User-facing mounts for the Mounted Drives sidebar section.
 /// Includes `/media` / `/run/media` volumes (PN, MEDIA, USB sticks, …),
 /// phone MTP / camera PTP mounts under GVFS, and classic removable drives —
 /// not the root FS, boot, or snap mounts.
 fn user_mounted_drives() -> Vec<gio::Mount> {
+    if !volume_monitor_safe() {
+        return Vec::new();
+    }
     let monitor = gio::VolumeMonitor::get();
     let mut mounts: Vec<gio::Mount> = monitor
         .mounts()
@@ -761,11 +854,7 @@ fn user_mounted_drives() -> Vec<gio::Mount> {
         mount_display_name(a)
             .to_ascii_lowercase()
             .cmp(&mount_display_name(b).to_ascii_lowercase())
-            .then_with(|| {
-                let pa = a.root().path().unwrap_or_default();
-                let pb = b.root().path().unwrap_or_default();
-                pa.cmp(&pb)
-            })
+            .then_with(|| mount_safe_id(a).cmp(&mount_safe_id(b)))
     });
     mounts
 }
@@ -780,22 +869,16 @@ fn mount_uri_scheme(mount: &gio::Mount) -> String {
 
 /// Phone MTP, camera PTP (`gphoto`/`gphoto2`), or iOS AFC mount via GVFS.
 fn is_phone_or_camera_mount(mount: &gio::Mount) -> bool {
+    let uri = mount_root_uri(mount);
     let scheme = mount_uri_scheme(mount);
     if DEVICE_SCHEMES.iter().any(|s| *s == scheme) {
         return true;
     }
-    // FUSE path under ~/.gvfs or /run/user/…/gvfs even if scheme probing fails.
-    if let Some(path) = mount.root().path() {
-        let s = path.to_string_lossy();
-        if s.contains("/gvfs/")
-            && DEVICE_SCHEMES
-                .iter()
-                .any(|sch| s.contains(&format!("{sch}:")))
-        {
-            return true;
-        }
-    }
-    false
+    let u = uri.to_ascii_lowercase();
+    u.contains("/gvfs/")
+        && DEVICE_SCHEMES
+            .iter()
+            .any(|sch| u.contains(&format!("{sch}:")))
 }
 
 fn is_user_mounted_drive(mount: &gio::Mount) -> bool {
@@ -804,24 +887,22 @@ fn is_user_mounted_drive(mount: &gio::Mount) -> bool {
         return true;
     }
 
-    let root = mount.root();
-    let Some(path) = root.path() else {
+    let uri = mount_root_uri(mount);
+    if mount_uri_is_gvfs(&uri) {
+        return false;
+    }
+    let Some(path) = mount_safe_local_path(mount) else {
         return false;
     };
     let s = path.to_string_lossy();
     if s == "/" || s.starts_with("/boot") || s.starts_with("/snap") || s.starts_with("/var/") {
         return false;
     }
-    // Never treat network GVFS mounts as local drives (those belong under Network).
-    if s.contains("/gvfs/") {
-        return false;
-    }
 
     // Anything under the classic automount roots is a "mounted drive" the
     // user expects to browse / eject — including NVMe partitions at /media.
-    // Avoid Path::is_dir() on slow/remote filesystems; media mounts are local.
     if s.starts_with("/media/") || s.starts_with("/run/media/") {
-        return mount.can_eject() || mount.can_unmount() || path.is_dir();
+        return true;
     }
 
     if let Some(drive) = mount.drive() {
@@ -906,6 +987,9 @@ fn pretty_name_from_device_uri(uri: &str) -> Option<String> {
 
 /// Volumes that exist but are not currently mounted (show with a Mount button).
 fn unmounted_volumes() -> Vec<gio::Volume> {
+    if !volume_monitor_safe() {
+        return Vec::new();
+    }
     let monitor = gio::VolumeMonitor::get();
     let mut vols: Vec<gio::Volume> = monitor
         .volumes()
@@ -1234,10 +1318,7 @@ fn make_mount_row_with_icon(
 ) -> gtk::ListBoxRow {
     let name = mount_display_name(mount);
     let root = mount.root();
-    // Prefer the GVFS FUSE path when present so local Path browsing works;
-    // fall back to the URI (mtp://…, gphoto2://…) when path() is None.
-    let place = root
-        .path()
+    let place = mount_safe_local_path(mount)
         .map(Place::Path)
         .unwrap_or_else(|| Place::Uri(root.uri().to_string()));
 
@@ -1253,7 +1334,7 @@ fn make_mount_row_with_icon(
     lbl.set_xalign(0.0);
     lbl.set_hexpand(true);
     lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    if let Some(path) = root.path() {
+    if let Some(path) = mount_safe_local_path(mount) {
         lbl.set_tooltip_text(Some(&path.display().to_string()));
     } else {
         lbl.set_tooltip_text(Some(&root.uri()));

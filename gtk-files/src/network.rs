@@ -15,6 +15,19 @@ use crate::util::{home_dir, show_error};
 
 const NETWORK_SCHEMES: &[&str] = &["sftp", "ssh", "ftp", "ftps", "smb", "dav", "davs", "nfs"];
 
+/// True when `uri` is a remote GVFS scheme (or a `file://…/gvfs/<scheme>:` FUSE path).
+pub fn uri_is_network_scheme(uri: &str) -> bool {
+    let u = uri.trim().to_ascii_lowercase();
+    let scheme = u.split(':').next().unwrap_or("");
+    if NETWORK_SCHEMES.iter().any(|s| *s == scheme) {
+        return true;
+    }
+    u.contains("/gvfs/")
+        && NETWORK_SCHEMES
+            .iter()
+            .any(|s| u.contains(&format!("{s}:")))
+}
+
 thread_local! {
     /// Prevents a second Connect dialog when the sidebar fires activate twice.
     static CONNECT_UI_OPEN: Cell<bool> = const { Cell::new(false) };
@@ -90,34 +103,18 @@ pub fn network_mounts() -> Vec<gio::Mount> {
 }
 
 pub fn is_network_mount(mount: &gio::Mount) -> bool {
-    let root = mount.root();
-    let uri = root.uri().to_string();
-    let scheme = gio::File::for_uri(&uri)
-        .uri_scheme()
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_default();
-    if NETWORK_SCHEMES.iter().any(|s| *s == scheme) {
-        return true;
-    }
-    // FUSE GVFS path even when scheme probing fails.
-    if let Some(path) = root.path() {
-        let s = path.to_string_lossy();
-        if s.contains("/gvfs/")
-            && NETWORK_SCHEMES
-                .iter()
-                .any(|sch| s.contains(&format!("{sch}:")))
-        {
-            return true;
-        }
-    }
-    false
+    uri_is_network_scheme(&mount.root().uri())
 }
 
 /// Ensure `~/Network/<label>` → mount path, and keep `~/Network` present.
 /// Returns the symlink path when created or already correct.
 pub fn ensure_home_shortcut(mount: &gio::Mount) -> Option<PathBuf> {
     let root = mount.root();
-    // Never call Path::exists() on GVFS — synchronous network I/O on the UI thread.
+    let uri = root.uri().to_string();
+    // Never call GFile::path() on GVFS — a wedged FUSE blocks the UI thread.
+    if uri_is_network_scheme(&uri) || uri.contains("/gvfs/") {
+        return None;
+    }
     let target = root.path()?;
 
     let dir = network_home_dir();
