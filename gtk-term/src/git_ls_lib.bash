@@ -189,9 +189,167 @@ gtk_term_apply_nested() {
     [ -e "$d/.git" ] || continue
     child=$(basename -- "$d")
     [ "$child" = "." ] || [ "$child" = ".." ] || [ "$child" = ".git" ] && continue
-    decor=$(gtk_term_repo_worst "$d")
+    decor=$(gtk_term_repo_worst_cached "$d")
     gtk_term_note "$child" "$decor"
   done
+}
+
+# How far below the listed directory we look for nested git repos.
+# A change at any depth colors the immediate child, so `ls /` can show
+# `home` when a new file exists under /home/.../SamStation.
+GTK_TERM_MAX_DEPTH=24
+GTK_TERM_FIND_TTL=30
+GTK_TERM_STATUS_TTL=5
+
+gtk_term_cache_dir() {
+  printf '%s' "${XDG_CACHE_HOME:-$HOME/.cache}/gtk-term"
+}
+
+# Skip virtual and system trees when the listing is `/`. Project checkouts
+# under /home, /root, /opt, and similar are still walked.
+gtk_term_skip_root_child() {
+  case "$1" in
+    proc|sys|dev|run|tmp|boot|snap|usr|var|bin|sbin|lib|lib64) return 0 ;;
+  esac
+  return 1
+}
+
+gtk_term_repo_worst_cached() {
+  local repo="$1" cache id file now age
+  cache="$(gtk_term_cache_dir)/status"
+  mkdir -p "$cache"
+  id=$(printf '%s' "$repo" | md5sum | awk '{print $1}')
+  file="$cache/$id"
+  now=$(date +%s)
+  if [ -f "$file" ]; then
+    age=$((now - $(stat -c %Y "$file" 2>/dev/null || echo 0)))
+    if [ "$age" -ge 0 ] && [ "$age" -lt "$GTK_TERM_STATUS_TTL" ]; then
+      cat "$file"
+      return 0
+    fi
+  fi
+  local decor
+  decor=$(gtk_term_repo_worst "$repo")
+  printf '%s' "$decor" >"$file"
+  printf '%s' "$decor"
+}
+
+# Print repo roots (parent of .git) under $1. Prunes the same heavy
+# directories gtk-files skips.
+gtk_term_find_gits() {
+  local start="$1" gitpath
+  [ -d "$start" ] || return 0
+  while IFS= read -r gitpath; do
+    [ -n "$gitpath" ] || continue
+    printf '%s\n' "${gitpath%/.git}"
+  done < <(find -P "$start" -mindepth 1 -maxdepth "$GTK_TERM_MAX_DEPTH" \
+    \( -name node_modules -o -name target -o -name venv -o -name .venv \
+       -o -name __pycache__ -o -name .cache -o -name .cargo -o -name .nvm \
+       -o -name .npm -o -name .cursor \) -prune -o \
+    -name .git -prune -print 2>/dev/null)
+}
+
+gtk_term_refresh_repos_under() {
+  local start="$1" found="$2" cache file tmp
+  cache="$(gtk_term_cache_dir)"
+  mkdir -p "$cache"
+  file="$cache/git-repos"
+  tmp=$(mktemp)
+  if [ -f "$file" ]; then
+    awk -v p="$start" '
+      $0 == p { next }
+      index($0, p "/") == 1 { next }
+      { print }
+    ' "$file" >"$tmp"
+  fi
+  if [ -s "$found" ]; then
+    cat "$found" >>"$tmp"
+  fi
+  sort -u "$tmp" -o "$file"
+  rm -f "$tmp"
+}
+
+gtk_term_discover_due() {
+  local stamp="$1" now age
+  [ -f "$stamp" ] || return 0
+  now=$(date +%s)
+  age=$((now - $(stat -c %Y "$stamp" 2>/dev/null || echo 0)))
+  [ "$age" -ge "$GTK_TERM_FIND_TTL" ]
+}
+
+# Refresh the repo-root cache for this listing. From `/`, walk home and
+# other non-system children instead of the whole filesystem.
+gtk_term_discover_repos() {
+  local listed="$1" cache id stamp found start base
+  cache="$(gtk_term_cache_dir)"
+  mkdir -p "$cache"
+  id=$(printf '%s' "$listed" | md5sum | awk '{print $1}')
+  stamp="$cache/find-$id"
+  if ! gtk_term_discover_due "$stamp"; then
+    return 0
+  fi
+  gtk_term_discover_tree() {
+    local start="$1" piece
+    [ -d "$start" ] || return 0
+    piece=$(mktemp)
+    gtk_term_find_gits "$start" >"$piece"
+    gtk_term_refresh_repos_under "$start" "$piece"
+    rm -f "$piece"
+  }
+  if [ "$listed" = "/" ]; then
+    for start in /home /root /opt /mnt /media /srv /data /nix; do
+      gtk_term_discover_tree "$start"
+    done
+    for start in /*/; do
+      base=$(basename "$start")
+      gtk_term_skip_root_child "$base" && continue
+      case "$start" in
+        /home/|/root/|/opt/|/mnt/|/media/|/srv/|/data/|/nix/) continue ;;
+      esac
+      gtk_term_discover_tree "${start%/}"
+    done
+  else
+    gtk_term_discover_tree "$listed"
+  fi
+  : >"$stamp"
+}
+
+# Immediate child of `listed` that contains `repo`, if any.
+gtk_term_child_containing() {
+  local listed="$1" repo="$2" prefix rest
+  prefix=$listed
+  [ "$prefix" = "/" ] && prefix=""
+  case "$repo" in
+    "$prefix"/*) ;;
+    *) return 1 ;;
+  esac
+  rest=${repo#"$prefix"/}
+  [ -n "$rest" ] || return 1
+  printf '%s' "${rest%%/*}"
+}
+
+# Color each visible folder if any git repo under it (any depth) is dirty.
+gtk_term_apply_deep() {
+  local listed="$1" cache file repo child decor
+  gtk_term_apply_nested "$listed"
+  gtk_term_discover_repos "$listed"
+  cache="$(gtk_term_cache_dir)"
+  file="$cache/git-repos"
+  [ -f "$file" ] || return 0
+  while IFS= read -r repo || [ -n "$repo" ]; do
+    [ -n "$repo" ] || continue
+    [ "$repo" = "$listed" ] && continue
+    [ -e "$repo/.git" ] || continue
+    if ! child=$(gtk_term_child_containing "$listed" "$repo"); then
+      continue
+    fi
+    [ -d "$listed/$child" ] || [ "$listed" = "/" -a -d "/$child" ] || continue
+    if [ "${COLORS[$child]:-}" = "conflict" ]; then
+      continue
+    fi
+    decor=$(gtk_term_repo_worst_cached "$repo")
+    gtk_term_note "$child" "$decor"
+  done <"$file"
 }
 
 gtk_term_scan_dir() {
@@ -206,7 +364,7 @@ gtk_term_scan_dir() {
     # and drop the COLORS assignments.
     gtk_term_apply_porcelain "$listed_abs" "$repo" <<<"$porc"
   fi
-  gtk_term_apply_nested "$listed_abs"
+  gtk_term_apply_deep "$listed_abs"
 }
 
 gtk_term_abs_dir() {
