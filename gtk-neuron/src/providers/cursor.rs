@@ -65,7 +65,7 @@ pub fn chat_cursor(
     let trimmed = line.trim();
     if !trimmed.is_empty() {
         if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
-    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+            if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
                 let msg = if err.to_ascii_lowercase().contains("invalid user api key")
                     || err.to_ascii_lowercase().contains("unauthenticated")
                 {

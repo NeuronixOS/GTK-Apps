@@ -25,7 +25,8 @@ fn run() -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path).map_err(|e| format!("bind {}: {e}", path.display()))?;
+    let listener =
+        UnixListener::bind(&path).map_err(|e| format!("bind {}: {e}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -108,20 +109,15 @@ fn handle_client(stream: UnixStream) -> Result<(), String> {
                     }),
                 )?;
             }
-            Message::CredentialsSet(p) => {
-                match credentials::set_api_key(p.provider, &p.api_key) {
-                    Ok(creds) => write_locked(
-                        &stream,
-                        &Message::ProvidersStatus(ProvidersStatusParams {
-                            providers: credentials::status_list(&creds),
-                        }),
-                    )?,
-                    Err(e) => write_locked(
-                        &stream,
-                        &Message::Error(ErrorParams { message: e }),
-                    )?,
-                }
-            }
+            Message::CredentialsSet(p) => match credentials::set_api_key(p.provider, &p.api_key) {
+                Ok(creds) => write_locked(
+                    &stream,
+                    &Message::ProvidersStatus(ProvidersStatusParams {
+                        providers: credentials::status_list(&creds),
+                    }),
+                )?,
+                Err(e) => write_locked(&stream, &Message::Error(ErrorParams { message: e }))?,
+            },
             Message::ChatStart(p) => {
                 let mut st = state.lock().map_err(|e| e.to_string())?;
                 st.sessions.insert(
@@ -202,13 +198,7 @@ fn run_chat(
         "You are ꔮ, the Neuronix driving assistant for {app_id}. Be concise. Prefer using tools when the user asks to act on files, terminal, images, or editor buffers."
     );
 
-    let prior: Vec<(String, String)> = history
-        .iter()
-        .rev()
-        .skip(1)
-        .rev()
-        .cloned()
-        .collect();
+    let prior: Vec<(String, String)> = history.iter().rev().skip(1).rev().cloned().collect();
 
     let reply = match providers::chat(provider, &creds, &system, &user_text, &prior, &caps) {
         Ok(r) => r,

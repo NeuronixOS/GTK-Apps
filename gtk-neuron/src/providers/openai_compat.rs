@@ -45,10 +45,7 @@ pub fn chat_openai_compat(
         "temperature": 0.4,
     });
 
-    let url = format!(
-        "{}/chat/completions",
-        cfg.base_url.trim_end_matches('/')
-    );
+    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
 
     let resp = match ureq::post(&url)
         .set("Content-Type", "application/json")

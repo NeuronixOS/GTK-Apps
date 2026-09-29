@@ -5,8 +5,8 @@
 
 use std::path::Path;
 
-use gtk4 as gtk;
 use gtk::{gio, glib};
+use gtk4 as gtk;
 use vte4::prelude::*;
 
 use crate::config::{Config, CursorBlinkSetting};
@@ -144,11 +144,13 @@ fn register_url_patterns(terminal: &vte4::Terminal) {
 }
 
 fn spawn_process(terminal: &vte4::Terminal, cwd: Option<&Path>, command: Option<&[String]>) {
-    let argv: Vec<String> = match command {
-        Some(cmd) if !cmd.is_empty() => cmd.to_vec(),
+    // Custom commands (btop, …) stay untouched. The interactive shell gets a
+    // git-aware `ls` so dirty folders use the same blue/orange/red as gtk-files.
+    let (argv, integration_env): (Vec<String>, Vec<(String, String)>) = match command {
+        Some(cmd) if !cmd.is_empty() => (cmd.to_vec(), Vec::new()),
         _ => {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-            vec![shell, "-i".into()]
+            let launch = crate::git_ls::interactive_shell();
+            (launch.argv, launch.env)
         }
     };
     let dir = cwd
@@ -166,12 +168,13 @@ fn spawn_process(terminal: &vte4::Terminal, cwd: Option<&Path>, command: Option<
     // it is a blank environment, which starts a non-interactive shell with no prompt.
     let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
 
-    let mut env_owned: Vec<String> = std::env::vars()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect();
+    let mut env_owned: Vec<String> = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
     upsert_env(&mut env_owned, "TERM", "xterm-256color");
     upsert_env(&mut env_owned, "COLORTERM", "truecolor");
     env_owned.retain(|e| !e.eq_ignore_ascii_case("NO_COLOR") && !e.starts_with("NO_COLOR="));
+    for (key, value) in &integration_env {
+        upsert_env(&mut env_owned, key, value);
+    }
     let env_refs: Vec<&str> = env_owned.iter().map(String::as_str).collect();
 
     let term = terminal.clone();

@@ -11,11 +11,11 @@
 
 use std::sync::Once;
 
-use gtk4 as gtk;
 use gtk::gdk;
 use gtk::gio;
 use gtk::glib::prelude::*;
 use gtk::prelude::*;
+use gtk4 as gtk;
 
 /// Default pixel size for symbolic chrome icons beside labels.
 pub const SYMBOLIC_PIXEL_SIZE: i32 = 16;
@@ -88,20 +88,20 @@ pub fn ensure_adwaita_icons() {
 /// Custom [`IconMenu`] rows use a plain [`gtk::Label`], which does not honor
 /// underscore mnemonics — leaving `_About` visible literally.
 pub fn strip_mnemonic(label: &str) -> String {
-	let mut out = String::with_capacity(label.len());
-	let mut chars = label.chars().peekable();
-	while let Some(c) = chars.next() {
-		if c == '_' {
-			if chars.peek() == Some(&'_') {
-				chars.next();
-				out.push('_');
-			}
-			// else: drop the mnemonic marker; keep the following character
-			continue;
-		}
-		out.push(c);
-	}
-	out
+    let mut out = String::with_capacity(label.len());
+    let mut chars = label.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '_' {
+            if chars.peek() == Some(&'_') {
+                chars.next();
+                out.push('_');
+            }
+            // else: drop the mnemonic marker; keep the following character
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// A single custom menu row: icon beside label.

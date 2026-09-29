@@ -23,12 +23,12 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use gtk4 as gtk;
 use gtk::gdk;
 use gtk::gio;
 use gtk::gio::prelude::*;
 use gtk::glib;
 use gtk::prelude::*;
+use gtk4 as gtk;
 use serde::{Deserialize, Serialize};
 
 /// A named, built-in color scheme.
@@ -414,7 +414,11 @@ impl ProfileData {
         }
         if chrome.bar_inactive.is_none() {
             let surface = mix_hex(&self.background, &self.foreground, 0.08);
-            chrome.bar_inactive = Some(chrome.bar_inactive_stops(&surface, &self.background).to_vec());
+            chrome.bar_inactive = Some(
+                chrome
+                    .bar_inactive_stops(&surface, &self.background)
+                    .to_vec(),
+            );
         }
         self.chrome = Some(chrome);
     }
@@ -501,7 +505,9 @@ impl ProfileData {
 
     pub fn set_bar_stop(&mut self, i: usize, hex: String) {
         let surface = mix_hex(&self.background, &self.foreground, 0.10);
-        let mut pair = self.chrome_or_default().bar_stops(&surface, &self.foreground);
+        let mut pair = self
+            .chrome_or_default()
+            .bar_stops(&surface, &self.foreground);
         pair[i.min(1)] = hex;
         self.chrome_mut().bar = Some(pair.to_vec());
     }
@@ -531,10 +537,7 @@ impl ProfileData {
 
     /// Suite accent — palette slot 4 (Blue / `--accent-blue`).
     pub fn accent(&self) -> &str {
-        self.palette
-            .get(4)
-            .map(|s| s.as_str())
-            .unwrap_or("#458588")
+        self.palette.get(4).map(|s| s.as_str()).unwrap_or("#458588")
     }
 
     /// Ensure exactly 16 palette entries (pad/truncate) for a valid Profile.
@@ -685,8 +688,7 @@ pub fn custom_id_for_name(name: &str, keep: Option<&str>) -> String {
         if Some(candidate) == keep {
             return false;
         }
-        PROFILES.iter().any(|p| p.id == candidate)
-            || existing.iter().any(|p| p.id == candidate)
+        PROFILES.iter().any(|p| p.id == candidate) || existing.iter().any(|p| p.id == candidate)
     };
 
     if !taken(&base) {
@@ -768,15 +770,9 @@ fn chrome_css_raw(fg: &str, bg: &str, accent: &str, accent_red: &str) -> String 
     };
     // Window controls (min/max/close): muted icon, brighter on hover — no bg wash.
     let (wc_icon, wc_icon_hover) = if is_dark {
-        (
-            format!("alpha({fg}, 0.55)"),
-            mix_hex(fg, "#ffffff", 0.45),
-        )
+        (format!("alpha({fg}, 0.55)"), mix_hex(fg, "#ffffff", 0.45))
     } else {
-        (
-            format!("alpha({fg}, 0.50)"),
-            mix_hex(fg, "#000000", 0.35),
-        )
+        (format!("alpha({fg}, 0.50)"), mix_hex(fg, "#000000", 0.35))
     };
     // Editor body text: on dark profiles, soften near-white fg to a soft grey
     // so gtk-edit isn't harsh bright white on black.
@@ -1812,7 +1808,16 @@ pub fn present_file_chooser(
     initial_name: Option<&str>,
     callback: impl FnOnce(Option<gio::File>) + 'static,
 ) {
-    present_file_chooser_at(parent, title, action, accept_label, filter, initial_name, None, callback);
+    present_file_chooser_at(
+        parent,
+        title,
+        action,
+        accept_label,
+        filter,
+        initial_name,
+        None,
+        callback,
+    );
 }
 
 /// Like [`present_file_chooser`], optionally starting in `current_folder`.
@@ -1879,10 +1884,7 @@ pub fn present_file_chooser_at(
         if matches!(response, gtk::ResponseType::DeleteEvent) {
             return;
         }
-        let accept = matches!(
-            response,
-            gtk::ResponseType::Accept | gtk::ResponseType::Ok
-        );
+        let accept = matches!(response, gtk::ResponseType::Accept | gtk::ResponseType::Ok);
         // Swallow the click that opened this dialog from a popover menu.
         if accept {
             let too_soon = mapped_at
@@ -1901,10 +1903,8 @@ pub fn present_file_chooser_at(
         let file = match response {
             gtk::ResponseType::Accept | gtk::ResponseType::Ok => dlg.file().or_else(|| {
                 let list = dlg.files();
-                (0..list.n_items()).find_map(|i| {
-                    list.item(i)
-                        .and_then(|o| o.downcast::<gio::File>().ok())
-                })
+                (0..list.n_items())
+                    .find_map(|i| list.item(i).and_then(|o| o.downcast::<gio::File>().ok()))
             }),
             _ => None,
         };
@@ -2006,7 +2006,9 @@ pub fn sourceview_scheme_candidates(profile_id: &str) -> &'static [&'static str]
         "tokyo-night" | "tokyo-night-storm" => &["tokyo-night", "Adwaita-dark", "classic"],
         "dracula" => &["dracula", "Adwaita-dark", "classic"],
         "nord" => &["nord", "Adwaita-dark", "classic"],
-        "catppuccin-mocha" | "catppuccin-frappe" => &["catppuccin-mocha", "Adwaita-dark", "classic"],
+        "catppuccin-mocha" | "catppuccin-frappe" => {
+            &["catppuccin-mocha", "Adwaita-dark", "classic"]
+        }
         "catppuccin-latte" => &["catppuccin-latte", "Adwaita", "classic"],
         "rose-pine" | "rose-pine-moon" => &["rose-pine", "Adwaita-dark", "classic"],
         "rose-pine-dawn" => &["rose-pine-dawn", "Adwaita", "classic"],
@@ -2165,8 +2167,7 @@ pub fn append_profile_menu(parent: &gio::Menu, action_name: &str) {
 
     // Opens gtk-theme-editor to create / tweak a custom profile.
     let editor_section = gio::Menu::new();
-    let custom_item =
-        gio::MenuItem::new(Some("Custom…"), Some(OPEN_THEME_EDITOR_MENU_ACTION));
+    let custom_item = gio::MenuItem::new(Some("Custom…"), Some(OPEN_THEME_EDITOR_MENU_ACTION));
     editor_section.append_item(&custom_item);
     profiles_menu.append_section(None, &editor_section);
 
@@ -2260,8 +2261,14 @@ fn sync_hyprbars_chrome(bar_hex: &str, text_hex: &str, chrome: &WindowChrome) ->
             let mut out = original.clone();
             out = replace_hypr_assign(&out, "bar_color", &bar_rgba);
             out = replace_or_insert_hypr_assign(&out, "bar_color2", &bar2_rgba, "bar_color");
-            out = replace_or_insert_hypr_assign(&out, "bar_color_inactive", &ibar_rgba, "bar_color2");
-            out = replace_or_insert_hypr_assign(&out, "bar_color_inactive2", &ibar2_rgba, "bar_color_inactive");
+            out =
+                replace_or_insert_hypr_assign(&out, "bar_color_inactive", &ibar_rgba, "bar_color2");
+            out = replace_or_insert_hypr_assign(
+                &out,
+                "bar_color_inactive2",
+                &ibar2_rgba,
+                "bar_color_inactive",
+            );
             out = replace_or_insert_hypr_assign(&out, "bar_gradient", dir, "bar_color_inactive2");
             out = replace_hypr_assign(&out, "col.text", &text_rgb);
             out = replace_hypr_assign(&out, "inactive_button_color", &ibar_rgb);
@@ -2317,7 +2324,8 @@ fn ensure_symbols_nerd_font() {
     let Some(src) = srcs.into_iter().find(|p| p.is_file()) else {
         return;
     };
-    if let Some(dest) = dirs::data_local_dir().map(|d| d.join("fonts/SymbolsNerdFont-Regular.ttf")) {
+    if let Some(dest) = dirs::data_local_dir().map(|d| d.join("fonts/SymbolsNerdFont-Regular.ttf"))
+    {
         if let Some(parent) = dest.parent() {
             let _ = std::fs::create_dir_all(parent);
             if std::fs::copy(&src, &dest).is_ok() {
@@ -2792,7 +2800,13 @@ fn css_rgba(hex: &str, alpha: f32) -> String {
     format!("rgba({r}, {g}, {b}, {alpha:.2})")
 }
 
-fn waybar_vars_block(fg: &str, bg: &str, surface: &str, inactive0: &str, inactive1: &str) -> String {
+fn waybar_vars_block(
+    fg: &str,
+    bg: &str,
+    surface: &str,
+    inactive0: &str,
+    inactive1: &str,
+) -> String {
     let dim = mix_hex(fg, surface, 0.35);
     let muted = mix_hex(fg, surface, 0.15);
     let hover = css_rgba(surface, 0.45);
@@ -3950,12 +3964,7 @@ fn sync_hypr_gtk_theme_env(is_dark: bool) {
     std::env::set_var("GTK_ICON_THEME", icons);
     std::env::set_var("XDG_ICON_THEME", icons);
     let _ = std::process::Command::new("dbus-update-activation-environment")
-        .args([
-            "--systemd",
-            "GTK_THEME",
-            "GTK_ICON_THEME",
-            "XDG_ICON_THEME",
-        ])
+        .args(["--systemd", "GTK_THEME", "GTK_ICON_THEME", "XDG_ICON_THEME"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -3969,7 +3978,8 @@ fn sync_shell_gtk_theme(profile: &Profile) {
     for root in shell_theme_roots() {
         let gtk3_dir = root.join("gtk-3.0");
         let gtk4_dir = root.join("gtk-4.0");
-        if std::fs::create_dir_all(&gtk3_dir).is_err() || std::fs::create_dir_all(&gtk4_dir).is_err()
+        if std::fs::create_dir_all(&gtk3_dir).is_err()
+            || std::fs::create_dir_all(&gtk4_dir).is_err()
         {
             continue;
         }
@@ -4004,7 +4014,11 @@ fn sync_gtk_user_css(profile: &Profile) {
         let prev = std::fs::read_to_string(&settings).unwrap_or_default();
         let mut ini = upsert_ini_key(&prev, "gtk-application-prefer-dark-theme", prefer);
         ini = upsert_ini_key(&ini, "gtk-theme-name", SHELL_GTK_THEME);
-        ini = upsert_ini_key(&ini, "gtk-icon-theme-name", papirus_icon_theme(profile.is_dark()));
+        ini = upsert_ini_key(
+            &ini,
+            "gtk-icon-theme-name",
+            papirus_icon_theme(profile.is_dark()),
+        );
         ini = upsert_ini_key(&ini, "gtk-button-images", "1");
         ini = upsert_ini_key(&ini, "gtk-menu-images", "1");
         let _ = std::fs::write(&settings, ini);
@@ -4202,8 +4216,7 @@ pub fn watch_theme(on_change: impl Fn(&Profile) + 'static) {
             save_theme_id(&load_theme_id());
         }
         let file = gio::File::for_path(theme_path());
-        let Ok(monitor) =
-            file.monitor_file(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)
+        let Ok(monitor) = file.monitor_file(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)
         else {
             return;
         };
@@ -4289,9 +4302,8 @@ fn mix_hex(a: &str, b: &str, t: f32) -> String {
     let (ar, ag, ab) = parse_rgb(a).unwrap_or((0, 0, 0));
     let (br, bg, bb) = parse_rgb(b).unwrap_or((255, 255, 255));
     let t = t.clamp(0.0, 1.0);
-    let mix = |x: u8, y: u8| -> u8 {
-        ((f32::from(x) * (1.0 - t)) + (f32::from(y) * t)).round() as u8
-    };
+    let mix =
+        |x: u8, y: u8| -> u8 { ((f32::from(x) * (1.0 - t)) + (f32::from(y) * t)).round() as u8 };
     format!("#{:02x}{:02x}{:02x}", mix(ar, br), mix(ag, bg), mix(ab, bb))
 }
 
@@ -4330,8 +4342,7 @@ fn refresh_custom_registry() {
     let list = load_custom_profiles();
     CUSTOM_REGISTRY.with(|reg| {
         let mut reg = reg.borrow_mut();
-        let live: std::collections::HashSet<String> =
-            list.iter().map(|d| d.id.clone()).collect();
+        let live: std::collections::HashSet<String> = list.iter().map(|d| d.id.clone()).collect();
         reg.retain(|id, _| live.contains(id));
         for data in list {
             let unchanged = reg
@@ -4377,9 +4388,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#ebdbb2",
         background: "#282828",
         palette: [
-            "#282828", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a",
-            "#a89984", "#928374", "#fb4934", "#b8bb26", "#fabd2f", "#83a598", "#d3869b",
-            "#8ec07c", "#ebdbb2",
+            "#282828", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#a89984",
+            "#928374", "#fb4934", "#b8bb26", "#fabd2f", "#83a598", "#d3869b", "#8ec07c", "#ebdbb2",
         ],
     },
     Profile {
@@ -4388,9 +4398,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#3c3836",
         background: "#fbf1c7",
         palette: [
-            "#fbf1c7", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a",
-            "#7c6f64", "#928374", "#9d0006", "#79740e", "#b57614", "#076678", "#8f3f71",
-            "#427b58", "#3c3836",
+            "#fbf1c7", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#7c6f64",
+            "#928374", "#9d0006", "#79740e", "#b57614", "#076678", "#8f3f71", "#427b58", "#3c3836",
         ],
     },
     // --- popular dark ---
@@ -4400,9 +4409,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#c0caf5",
         background: "#1a1b26",
         palette: [
-            "#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff",
-            "#a9b1d6", "#414868", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7",
-            "#7dcfff", "#c0caf5",
+            "#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6",
+            "#414868", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#c0caf5",
         ],
     },
     Profile {
@@ -4411,9 +4419,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#c0caf5",
         background: "#24283b",
         palette: [
-            "#1d202f", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff",
-            "#a9b1d6", "#414868", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7",
-            "#7dcfff", "#c0caf5",
+            "#1d202f", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6",
+            "#414868", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#c0caf5",
         ],
     },
     Profile {
@@ -4422,9 +4429,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#f8f8f2",
         background: "#282a36",
         palette: [
-            "#21222c", "#ff5555", "#50fa7b", "#f1fa8c", "#bd93f9", "#ff79c6", "#8be9fd",
-            "#f8f8f2", "#6272a4", "#ff6e6e", "#69ff94", "#ffffa5", "#d6acff", "#ff92df",
-            "#a4ffff", "#ffffff",
+            "#21222c", "#ff5555", "#50fa7b", "#f1fa8c", "#bd93f9", "#ff79c6", "#8be9fd", "#f8f8f2",
+            "#6272a4", "#ff6e6e", "#69ff94", "#ffffa5", "#d6acff", "#ff92df", "#a4ffff", "#ffffff",
         ],
     },
     Profile {
@@ -4433,9 +4439,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#d8dee9",
         background: "#2e3440",
         palette: [
-            "#3b4252", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#88c0d0",
-            "#e5e9f0", "#4c566a", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead",
-            "#8fbcbb", "#eceff4",
+            "#3b4252", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#88c0d0", "#e5e9f0",
+            "#4c566a", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#8fbcbb", "#eceff4",
         ],
     },
     Profile {
@@ -4444,9 +4449,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#cdd6f4",
         background: "#1e1e2e",
         palette: [
-            "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5",
-            "#bac2de", "#585b70", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7",
-            "#94e2d5", "#cdd6f4",
+            "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#bac2de",
+            "#585b70", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#cdd6f4",
         ],
     },
     Profile {
@@ -4455,9 +4459,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#c6d0f5",
         background: "#303446",
         palette: [
-            "#51576d", "#e78284", "#a6d189", "#e5c890", "#8caaee", "#f4b8e4", "#81c8be",
-            "#b5bfe2", "#626880", "#e78284", "#a6d189", "#e5c890", "#8caaee", "#f4b8e4",
-            "#81c8be", "#c6d0f5",
+            "#51576d", "#e78284", "#a6d189", "#e5c890", "#8caaee", "#f4b8e4", "#81c8be", "#b5bfe2",
+            "#626880", "#e78284", "#a6d189", "#e5c890", "#8caaee", "#f4b8e4", "#81c8be", "#c6d0f5",
         ],
     },
     Profile {
@@ -4466,9 +4469,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#e0def4",
         background: "#191724",
         palette: [
-            "#26233a", "#eb6f92", "#31748f", "#f6c177", "#9ccfd8", "#c4a7e7", "#ebbcba",
-            "#e0def4", "#6e6a86", "#eb6f92", "#31748f", "#f6c177", "#9ccfd8", "#c4a7e7",
-            "#ebbcba", "#e0def4",
+            "#26233a", "#eb6f92", "#31748f", "#f6c177", "#9ccfd8", "#c4a7e7", "#ebbcba", "#e0def4",
+            "#6e6a86", "#eb6f92", "#31748f", "#f6c177", "#9ccfd8", "#c4a7e7", "#ebbcba", "#e0def4",
         ],
     },
     Profile {
@@ -4477,9 +4479,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#e0def4",
         background: "#232136",
         palette: [
-            "#2a273f", "#eb6f92", "#3e8fb0", "#f6c177", "#9ccfd8", "#c4a7e7", "#ea9a97",
-            "#e0def4", "#6e6a86", "#eb6f92", "#3e8fb0", "#f6c177", "#9ccfd8", "#c4a7e7",
-            "#ea9a97", "#e0def4",
+            "#2a273f", "#eb6f92", "#3e8fb0", "#f6c177", "#9ccfd8", "#c4a7e7", "#ea9a97", "#e0def4",
+            "#6e6a86", "#eb6f92", "#3e8fb0", "#f6c177", "#9ccfd8", "#c4a7e7", "#ea9a97", "#e0def4",
         ],
     },
     Profile {
@@ -4488,9 +4489,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#abb2bf",
         background: "#282c34",
         palette: [
-            "#282c34", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2",
-            "#abb2bf", "#5c6370", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd",
-            "#56b6c2", "#ffffff",
+            "#282c34", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#abb2bf",
+            "#5c6370", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#ffffff",
         ],
     },
     Profile {
@@ -4499,9 +4499,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#f8f8f2",
         background: "#272822",
         palette: [
-            "#272822", "#f92672", "#a6e22e", "#f4bf75", "#66d9ef", "#ae81ff", "#a1efe4",
-            "#f8f8f2", "#75715e", "#f92672", "#a6e22e", "#f4bf75", "#66d9ef", "#ae81ff",
-            "#a1efe4", "#f9f8f5",
+            "#272822", "#f92672", "#a6e22e", "#f4bf75", "#66d9ef", "#ae81ff", "#a1efe4", "#f8f8f2",
+            "#75715e", "#f92672", "#a6e22e", "#f4bf75", "#66d9ef", "#ae81ff", "#a1efe4", "#f9f8f5",
         ],
     },
     Profile {
@@ -4510,9 +4509,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#dcd7ba",
         background: "#1f1f28",
         palette: [
-            "#090618", "#c34043", "#76946a", "#c0a36e", "#7e9cd8", "#957fb8", "#6a9589",
-            "#c8c093", "#727169", "#e82424", "#98bb6c", "#e6c384", "#7fb4ca", "#938aa9",
-            "#7aa89f", "#dcd7ba",
+            "#090618", "#c34043", "#76946a", "#c0a36e", "#7e9cd8", "#957fb8", "#6a9589", "#c8c093",
+            "#727169", "#e82424", "#98bb6c", "#e6c384", "#7fb4ca", "#938aa9", "#7aa89f", "#dcd7ba",
         ],
     },
     Profile {
@@ -4521,9 +4519,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#d3c6aa",
         background: "#2d353b",
         palette: [
-            "#475258", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092",
-            "#d3c6aa", "#7a8478", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6",
-            "#83c092", "#d3c6aa",
+            "#475258", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092", "#d3c6aa",
+            "#7a8478", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092", "#d3c6aa",
         ],
     },
     Profile {
@@ -4532,9 +4529,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#b3b1ad",
         background: "#0a0e14",
         palette: [
-            "#01060e", "#ea6c73", "#91b362", "#f9af4f", "#53bdfa", "#fae994", "#90e1c6",
-            "#c7c7c7", "#686868", "#f07178", "#c2d94c", "#ffb454", "#59c2ff", "#ffee99",
-            "#95e6cb", "#ffffff",
+            "#01060e", "#ea6c73", "#91b362", "#f9af4f", "#53bdfa", "#fae994", "#90e1c6", "#c7c7c7",
+            "#686868", "#f07178", "#c2d94c", "#ffb454", "#59c2ff", "#ffee99", "#95e6cb", "#ffffff",
         ],
     },
     Profile {
@@ -4543,9 +4539,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#cccac2",
         background: "#1f2430",
         palette: [
-            "#191e2a", "#ed8274", "#87d96c", "#fad07b", "#6dcbfa", "#fbb0ce", "#90e1c6",
-            "#c7c7c7", "#686868", "#f28779", "#d5ff80", "#ffcc66", "#73d0ff", "#f287bc",
-            "#95e6cb", "#ffffff",
+            "#191e2a", "#ed8274", "#87d96c", "#fad07b", "#6dcbfa", "#fbb0ce", "#90e1c6", "#c7c7c7",
+            "#686868", "#f28779", "#d5ff80", "#ffcc66", "#73d0ff", "#f287bc", "#95e6cb", "#ffffff",
         ],
     },
     Profile {
@@ -4554,9 +4549,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#d6deeb",
         background: "#011627",
         palette: [
-            "#011627", "#ef5350", "#22da6e", "#addb67", "#82aaff", "#c792ea", "#21c7a8",
-            "#ffffff", "#575656", "#ef5350", "#22da6e", "#ffeb95", "#82aaff", "#c792ea",
-            "#7fdbca", "#ffffff",
+            "#011627", "#ef5350", "#22da6e", "#addb67", "#82aaff", "#c792ea", "#21c7a8", "#ffffff",
+            "#575656", "#ef5350", "#22da6e", "#ffeb95", "#82aaff", "#c792ea", "#7fdbca", "#ffffff",
         ],
     },
     Profile {
@@ -4565,9 +4559,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#a6accd",
         background: "#292d3e",
         palette: [
-            "#292d3e", "#f07178", "#c3e88d", "#ffcb6b", "#82aaff", "#c792ea", "#89ddff",
-            "#d0d0d0", "#434758", "#ff8b92", "#ddffa7", "#ffe585", "#9cc4ff", "#e1acff",
-            "#a3f7ff", "#ffffff",
+            "#292d3e", "#f07178", "#c3e88d", "#ffcb6b", "#82aaff", "#c792ea", "#89ddff", "#d0d0d0",
+            "#434758", "#ff8b92", "#ddffa7", "#ffe585", "#9cc4ff", "#e1acff", "#a3f7ff", "#ffffff",
         ],
     },
     Profile {
@@ -4576,9 +4569,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#eeffff",
         background: "#212121",
         palette: [
-            "#000000", "#ff5370", "#c3e88d", "#ffcb6b", "#82aaff", "#c792ea", "#89ddff",
-            "#ffffff", "#545454", "#ff5370", "#c3e88d", "#ffcb6b", "#82aaff", "#c792ea",
-            "#89ddff", "#ffffff",
+            "#000000", "#ff5370", "#c3e88d", "#ffcb6b", "#82aaff", "#c792ea", "#89ddff", "#ffffff",
+            "#545454", "#ff5370", "#c3e88d", "#ffcb6b", "#82aaff", "#c792ea", "#89ddff", "#ffffff",
         ],
     },
     Profile {
@@ -4587,9 +4579,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#ffffff",
         background: "#193549",
         palette: [
-            "#000000", "#ff0000", "#38de21", "#ffe50a", "#1460d2", "#ff005d", "#00bbbb",
-            "#bbbbbb", "#555555", "#f40e17", "#3bd01d", "#edc809", "#5555ff", "#ff55ff",
-            "#6ae3fa", "#ffffff",
+            "#000000", "#ff0000", "#38de21", "#ffe50a", "#1460d2", "#ff005d", "#00bbbb", "#bbbbbb",
+            "#555555", "#f40e17", "#3bd01d", "#edc809", "#5555ff", "#ff55ff", "#6ae3fa", "#ffffff",
         ],
     },
     Profile {
@@ -4598,9 +4589,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#dcdccc",
         background: "#3f3f3f",
         palette: [
-            "#4f4f4f", "#705050", "#60b48a", "#f0dfaf", "#506070", "#dc8cc3", "#8cd0d3",
-            "#dcdccc", "#709080", "#dca3a3", "#c3bf9f", "#e0cf9f", "#94bff3", "#ec93d3",
-            "#93e0e3", "#ffffff",
+            "#4f4f4f", "#705050", "#60b48a", "#f0dfaf", "#506070", "#dc8cc3", "#8cd0d3", "#dcdccc",
+            "#709080", "#dca3a3", "#c3bf9f", "#e0cf9f", "#94bff3", "#ec93d3", "#93e0e3", "#ffffff",
         ],
     },
     Profile {
@@ -4609,9 +4599,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#c5c8c6",
         background: "#1d1f21",
         palette: [
-            "#1d1f21", "#cc6666", "#b5bd68", "#f0c674", "#81a2be", "#b294bb", "#8abeb7",
-            "#c5c8c6", "#969896", "#cc6666", "#b5bd68", "#f0c674", "#81a2be", "#b294bb",
-            "#8abeb7", "#ffffff",
+            "#1d1f21", "#cc6666", "#b5bd68", "#f0c674", "#81a2be", "#b294bb", "#8abeb7", "#c5c8c6",
+            "#969896", "#cc6666", "#b5bd68", "#f0c674", "#81a2be", "#b294bb", "#8abeb7", "#ffffff",
         ],
     },
     Profile {
@@ -4620,9 +4609,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#d8dee9",
         background: "#1b2b34",
         palette: [
-            "#29414f", "#ec5f67", "#99c794", "#fac863", "#6699cc", "#c594c5", "#5fb3b3",
-            "#d8dee9", "#405860", "#ec5f67", "#99c794", "#fac863", "#6699cc", "#c594c5",
-            "#5fb3b3", "#ffffff",
+            "#29414f", "#ec5f67", "#99c794", "#fac863", "#6699cc", "#c594c5", "#5fb3b3", "#d8dee9",
+            "#405860", "#ec5f67", "#99c794", "#fac863", "#6699cc", "#c594c5", "#5fb3b3", "#ffffff",
         ],
     },
     Profile {
@@ -4631,9 +4619,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#e6edf3",
         background: "#0d1117",
         palette: [
-            "#484f58", "#ff7b72", "#3fb950", "#d29922", "#58a6ff", "#bc8cff", "#39c5cf",
-            "#b1bac4", "#6e7681", "#ffa198", "#56d364", "#e3b341", "#79c0ff", "#d2a8ff",
-            "#56d4dd", "#ffffff",
+            "#484f58", "#ff7b72", "#3fb950", "#d29922", "#58a6ff", "#bc8cff", "#39c5cf", "#b1bac4",
+            "#6e7681", "#ffa198", "#56d364", "#e3b341", "#79c0ff", "#d2a8ff", "#56d4dd", "#ffffff",
         ],
     },
     Profile {
@@ -4642,9 +4629,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#f92aad",
         background: "#2b213a",
         palette: [
-            "#241b2f", "#f97e72", "#72f1b8", "#fede5d", "#36f9f6", "#ff7edb", "#f97e72",
-            "#ffffff", "#848bbd", "#f88414", "#72f1b8", "#fff951", "#36f9f6", "#ff7edb",
-            "#f97e72", "#ffffff",
+            "#241b2f", "#f97e72", "#72f1b8", "#fede5d", "#36f9f6", "#ff7edb", "#f97e72", "#ffffff",
+            "#848bbd", "#f88414", "#72f1b8", "#fff951", "#36f9f6", "#ff7edb", "#f97e72", "#ffffff",
         ],
     },
     // --- light ---
@@ -4654,9 +4640,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#839496",
         background: "#002b36",
         palette: [
-            "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198",
-            "#eee8d5", "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4",
-            "#93a1a1", "#fdf6e3",
+            "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#eee8d5",
+            "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3",
         ],
     },
     Profile {
@@ -4665,9 +4650,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#657b83",
         background: "#fdf6e3",
         palette: [
-            "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198",
-            "#eee8d5", "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4",
-            "#93a1a1", "#fdf6e3",
+            "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#eee8d5",
+            "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3",
         ],
     },
     Profile {
@@ -4676,9 +4660,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#4c4f69",
         background: "#eff1f5",
         palette: [
-            "#5c5f77", "#d20f39", "#40a02b", "#df8e1d", "#1e66f5", "#ea76cb", "#179299",
-            "#acb0be", "#6c6f85", "#d20f39", "#40a02b", "#df8e1d", "#1e66f5", "#ea76cb",
-            "#179299", "#4c4f69",
+            "#5c5f77", "#d20f39", "#40a02b", "#df8e1d", "#1e66f5", "#ea76cb", "#179299", "#acb0be",
+            "#6c6f85", "#d20f39", "#40a02b", "#df8e1d", "#1e66f5", "#ea76cb", "#179299", "#4c4f69",
         ],
     },
     Profile {
@@ -4687,9 +4670,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#575279",
         background: "#faf4ed",
         palette: [
-            "#f2e9e1", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e",
-            "#575279", "#9893a5", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9",
-            "#d7827e", "#575279",
+            "#f2e9e1", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e", "#575279",
+            "#9893a5", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e", "#575279",
         ],
     },
     Profile {
@@ -4698,9 +4680,8 @@ static PROFILES: [Profile; 30] = [
         foreground: "#1f2328",
         background: "#ffffff",
         palette: [
-            "#24292f", "#cf222e", "#116329", "#4d2d00", "#0969da", "#8250df", "#1b7c83",
-            "#6e7781", "#57606a", "#a40e26", "#1a7f37", "#633c01", "#218bff", "#a475f9",
-            "#3192aa", "#1f2328",
+            "#24292f", "#cf222e", "#116329", "#4d2d00", "#0969da", "#8250df", "#1b7c83", "#6e7781",
+            "#57606a", "#a40e26", "#1a7f37", "#633c01", "#218bff", "#a475f9", "#3192aa", "#1f2328",
         ],
     },
 ];

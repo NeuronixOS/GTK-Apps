@@ -9,9 +9,9 @@ use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 
-use gtk4 as gtk;
 use gtk::glib;
 use gtk::glib::{ControlFlow, IOCondition};
+use gtk4 as gtk;
 use serde_json::Value;
 
 use crate::protocol::{
@@ -358,8 +358,7 @@ pub fn drive_symbolic_image() -> gtk::Image {
     // custom icons that are not part of Adwaita.
     if let Some(path) = installed {
         let file = gtk::gio::File::for_path(path);
-        let paintable =
-            gtk::IconPaintable::for_file(&file, gtk_theme::SYMBOLIC_PIXEL_SIZE, 1);
+        let paintable = gtk::IconPaintable::for_file(&file, gtk_theme::SYMBOLIC_PIXEL_SIZE, 1);
         image.set_paintable(Some(&paintable));
         return image;
     }

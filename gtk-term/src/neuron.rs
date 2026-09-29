@@ -3,8 +3,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gtk4 as gtk;
 use gtk::prelude::*;
+use gtk4 as gtk;
 use serde_json::{json, Value};
 use vte4::prelude::*;
 

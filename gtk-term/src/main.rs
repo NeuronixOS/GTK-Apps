@@ -15,6 +15,7 @@
 //!   - Zoom, fullscreen, read-only, built-in color profiles
 
 mod config;
+mod git_ls;
 mod neuron;
 mod prefs;
 mod search;
@@ -25,9 +26,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gtk4 as gtk;
-use gtk::{gdk, gio, glib, pango};
 use gtk::prelude::*;
+use gtk::{gdk, gio, glib, pango};
+use gtk4 as gtk;
 use vte4::prelude::*;
 
 use config::Config;
@@ -241,8 +242,10 @@ fn parse_launch_opts(args: &[OsString]) -> LaunchOpts {
             i += 1;
             continue;
         }
-        if matches!(a.as_ref(), "--app-id" | "--class" | "--name" | "--gapplication-app-id")
-        {
+        if matches!(
+            a.as_ref(),
+            "--app-id" | "--class" | "--name" | "--gapplication-app-id"
+        ) {
             if let Some(p) = args.get(i + 1) {
                 opts.app_id = normalize_app_id(&p.to_string_lossy());
             }
@@ -363,9 +366,15 @@ fn build_ui(app: &gtk::Application, opts: LaunchOpts) {
                 return;
             }
             applied.set(true);
-            let Some(win) = window_weak.upgrade() else { return };
-            let Some(nb) = notebook_weak.upgrade() else { return };
-            let Some(term) = current_terminal(&nb) else { return };
+            let Some(win) = window_weak.upgrade() else {
+                return;
+            };
+            let Some(nb) = notebook_weak.upgrade() else {
+                return;
+            };
+            let Some(term) = current_terminal(&nb) else {
+                return;
+            };
             let win = win.clone();
             let term = term.clone();
             glib::idle_add_local_once(move || {
@@ -390,8 +399,7 @@ fn build_ui_with_existing_tab(
     state.zoom = terminal_from_scroller(&scroller)
         .map(|t| t.font_scale())
         .unwrap_or(1.0);
-    let (window, notebook, zoom_label) =
-        build_window_shell(app, Rc::clone(&config), &state, false);
+    let (window, notebook, zoom_label) = build_window_shell(app, Rc::clone(&config), &state, false);
     attach_existing_tab(&window, &notebook, scroller, &config.borrow());
     refresh_zoom_label(&notebook, &zoom_label);
     if let Some(term) = current_terminal(&notebook) {
@@ -470,8 +478,7 @@ fn build_window_shell(
         let notebook_weak = notebook.downgrade();
         let cfg = Rc::clone(&cfg);
         new_tab_btn.connect_clicked(move |_| {
-            if let (Some(window), Some(notebook)) =
-                (window_weak.upgrade(), notebook_weak.upgrade())
+            if let (Some(window), Some(notebook)) = (window_weak.upgrade(), notebook_weak.upgrade())
             {
                 create_tab(&window, &notebook, &cfg.borrow());
             }
@@ -532,7 +539,11 @@ fn save_window_state(window: &gtk::ApplicationWindow, notebook: &gtk::Notebook) 
 
     let state = config::State {
         window_width: if maximized || width <= 0 { 900 } else { width },
-        window_height: if maximized || height <= 0 { 560 } else { height },
+        window_height: if maximized || height <= 0 {
+            560
+        } else {
+            height
+        },
         zoom,
         profile,
         maximized,
@@ -579,7 +590,12 @@ fn build_menu_button(zoom_label: &gtk::Label, notebook: &gtk::Notebook) -> gtk::
 
     // Size presets stay plain so radio/state indicators remain visible.
     let size_section = gio::Menu::new();
-    let sizes = [("80×24", "80x24"), ("80×43", "80x43"), ("132×24", "132x24"), ("132×43", "132x43")];
+    let sizes = [
+        ("80×24", "80x24"),
+        ("80×43", "80x43"),
+        ("132×24", "132x24"),
+        ("132×43", "132x43"),
+    ];
     for (label, target) in sizes {
         let item = gio::MenuItem::new(Some(label), None);
         item.set_action_and_target_value(Some("win.size-to"), Some(&target.to_variant()));
@@ -619,7 +635,10 @@ fn build_menu_button(zoom_label: &gtk::Label, notebook: &gtk::Notebook) -> gtk::
     zoom_out.set_action_name(Some("win.zoom-out"));
     zoom_out.set_tooltip_text(Some("Zoom out"));
 
-    let zoom_reset = gtk::Button::builder().child(zoom_label).hexpand(true).build();
+    let zoom_reset = gtk::Button::builder()
+        .child(zoom_label)
+        .hexpand(true)
+        .build();
     zoom_reset.set_action_name(Some("win.zoom-reset"));
     zoom_reset.set_tooltip_text(Some("Reset zoom"));
 
@@ -665,8 +684,7 @@ fn install_actions(
         let notebook_weak = notebook.downgrade();
         let cfg = Rc::clone(&cfg);
         act_new.connect_activate(move |_, _| {
-            if let (Some(window), Some(notebook)) =
-                (window_weak.upgrade(), notebook_weak.upgrade())
+            if let (Some(window), Some(notebook)) = (window_weak.upgrade(), notebook_weak.upgrade())
             {
                 create_tab(&window, &notebook, &cfg.borrow());
             }
@@ -680,8 +698,7 @@ fn install_actions(
         let notebook_weak = notebook.downgrade();
         let window_weak = window.downgrade();
         act_close.connect_activate(move |_, _| {
-            if let (Some(notebook), Some(window)) =
-                (notebook_weak.upgrade(), window_weak.upgrade())
+            if let (Some(notebook), Some(window)) = (notebook_weak.upgrade(), window_weak.upgrade())
             {
                 if let Some(page) = notebook.current_page() {
                     remove_tab(&notebook, &window, page);
@@ -879,14 +896,15 @@ fn install_actions(
         let notebook_weak = notebook.downgrade();
         let cfg = Rc::clone(&cfg);
         act_prefs.connect_activate(move |_, _| {
-            let Some(window) = window_weak.upgrade() else { return };
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
             let notebook_weak = notebook_weak.clone();
             let window_weak = window.downgrade();
             prefs::show_preferences(&window, Rc::clone(&cfg), move |c| {
                 if let Some(nb) = notebook_weak.upgrade() {
                     apply_config_to_notebook(&nb, c);
-                    if let (Some(win), Some(term)) =
-                        (window_weak.upgrade(), current_terminal(&nb))
+                    if let (Some(win), Some(term)) = (window_weak.upgrade(), current_terminal(&nb))
                     {
                         resize_window_to_grid(&win, &term, c.columns, c.rows);
                     }
@@ -902,8 +920,7 @@ fn install_actions(
         let window_weak = window.downgrade();
         let notebook_weak = notebook.downgrade();
         act_title.connect_activate(move |_, _| {
-            if let (Some(window), Some(notebook)) =
-                (window_weak.upgrade(), notebook_weak.upgrade())
+            if let (Some(window), Some(notebook)) = (window_weak.upgrade(), notebook_weak.upgrade())
             {
                 show_set_title_dialog(&window, &notebook);
             }
@@ -918,13 +935,19 @@ fn install_actions(
         let window_weak = window.downgrade();
         let cfg = Rc::clone(&cfg);
         act_size.connect_activate(move |_, param| {
-            let Some(s) = param.and_then(|p| p.get::<String>()) else { return };
+            let Some(s) = param.and_then(|p| p.get::<String>()) else {
+                return;
+            };
             let parts: Vec<&str> = s.split('x').collect();
             if parts.len() != 2 {
                 return;
             }
-            let Ok(cols) = parts[0].parse::<i64>() else { return };
-            let Ok(rows) = parts[1].parse::<i64>() else { return };
+            let Ok(cols) = parts[0].parse::<i64>() else {
+                return;
+            };
+            let Ok(rows) = parts[1].parse::<i64>() else {
+                return;
+            };
             if let (Some(nb), Some(win)) = (notebook_weak.upgrade(), window_weak.upgrade()) {
                 if let Some(term) = current_terminal(&nb) {
                     resize_window_to_grid(&win, &term, cols, rows);
@@ -1075,14 +1098,15 @@ fn current_terminal(notebook: &gtk::Notebook) -> Option<vte4::Terminal> {
 // Tab management.
 // ---------------------------------------------------------------------------
 
-pub(crate) fn create_tab(window: &gtk::ApplicationWindow, notebook: &gtk::Notebook, config: &Config) {
+pub(crate) fn create_tab(
+    window: &gtk::ApplicationWindow,
+    notebook: &gtk::Notebook,
+    config: &Config,
+) {
     let cwd = window_cwd(window);
     let command = take_window_command(window);
-    let terminal = terminal::build_terminal_with_command(
-        config,
-        cwd.as_deref(),
-        command.as_deref(),
-    );
+    let terminal =
+        terminal::build_terminal_with_command(config, cwd.as_deref(), command.as_deref());
     terminal::apply_profile(&terminal, gtk_theme::load_profile());
 
     let scroller = gtk::ScrolledWindow::builder()
@@ -1171,10 +1195,7 @@ fn resize_window_to_grid(
     let (pixel_w, pixel_h) = if win_w > 0 && win_h > 0 && alloc.width() > 0 && alloc.height() > 0 {
         let chrome_w = (win_w - alloc.width()).max(0);
         let chrome_h = (win_h - alloc.height()).max(0);
-        (
-            chrome_w + cols as i32 * cw,
-            chrome_h + rows as i32 * ch,
-        )
+        (chrome_w + cols as i32 * cw, chrome_h + rows as i32 * ch)
     } else {
         // Before realize: rough chrome allowance for header + notebook tabs.
         (cols as i32 * cw + 48, rows as i32 * ch + 96)
@@ -1515,8 +1536,12 @@ fn detach_current_tab(
     notebook: &gtk::Notebook,
     config: Rc<RefCell<Config>>,
 ) {
-    let Some(page_num) = notebook.current_page() else { return };
-    let Some(child) = notebook.nth_page(Some(page_num)) else { return };
+    let Some(page_num) = notebook.current_page() else {
+        return;
+    };
+    let Some(child) = notebook.nth_page(Some(page_num)) else {
+        return;
+    };
     let Ok(scroller) = child.downcast::<gtk::ScrolledWindow>() else {
         return;
     };
@@ -1553,8 +1578,12 @@ fn detach_tab(
 // ---------------------------------------------------------------------------
 
 fn show_set_title_dialog(window: &gtk::ApplicationWindow, notebook: &gtk::Notebook) {
-    let Some(page) = notebook.current_page() else { return };
-    let Some(child) = notebook.nth_page(Some(page)) else { return };
+    let Some(page) = notebook.current_page() else {
+        return;
+    };
+    let Some(child) = notebook.nth_page(Some(page)) else {
+        return;
+    };
 
     let entry = gtk::Entry::builder()
         .placeholder_text("Tab title")
@@ -1583,8 +1612,7 @@ fn show_set_title_dialog(window: &gtk::ApplicationWindow, notebook: &gtk::Notebo
 
     let btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     btn_box.set_halign(gtk::Align::End);
-    let cancel_btn =
-        gtk_theme::labeled_button(gtk_theme::icon_for_label("Cancel"), "Cancel");
+    let cancel_btn = gtk_theme::labeled_button(gtk_theme::icon_for_label("Cancel"), "Cancel");
     let ok_btn = gtk_theme::labeled_button(gtk_theme::icon_for_label("OK"), "OK");
     ok_btn.add_css_class("suggested-action");
     btn_box.append(&cancel_btn);
@@ -1702,10 +1730,8 @@ fn show_confirm_close_dialog(
 
     let btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     btn_box.set_halign(gtk::Align::Center);
-    let cancel_btn =
-        gtk_theme::labeled_button(gtk_theme::icon_for_label("Cancel"), "Cancel");
-    let close_btn =
-        gtk_theme::labeled_button(gtk_theme::icon_for_label("Close"), "Close");
+    let cancel_btn = gtk_theme::labeled_button(gtk_theme::icon_for_label("Cancel"), "Cancel");
+    let close_btn = gtk_theme::labeled_button(gtk_theme::icon_for_label("Close"), "Close");
     close_btn.add_css_class("destructive-action");
     btn_box.append(&cancel_btn);
     btn_box.append(&close_btn);

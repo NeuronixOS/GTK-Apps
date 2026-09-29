@@ -4,7 +4,12 @@ use serde_json::{json, Value};
 
 use crate::protocol::{CapabilitySpec, ProviderId};
 
-pub fn spec(name: &str, description: &str, schema: Value, requires_confirm: bool) -> CapabilitySpec {
+pub fn spec(
+    name: &str,
+    description: &str,
+    schema: Value,
+    requires_confirm: bool,
+) -> CapabilitySpec {
     CapabilitySpec {
         name: name.to_string(),
         description: description.to_string(),

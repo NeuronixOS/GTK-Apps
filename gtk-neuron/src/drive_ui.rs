@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use gtk4 as gtk;
 use gtk::gio;
 use gtk::prelude::*;
+use gtk4 as gtk;
 use serde_json::Value;
 
 use crate::capabilities;
@@ -76,11 +76,7 @@ impl DrivingMode {
     /// Register `win.driving-mode` (Ctrl+D) so menus and shortcuts can open the panel.
     pub fn install_window_action(&self, window: &gtk::ApplicationWindow) {
         let btn = self.button.clone();
-        let action = gio::SimpleAction::new_stateful(
-            "driving-mode",
-            None,
-            &false.to_variant(),
-        );
+        let action = gio::SimpleAction::new_stateful("driving-mode", None, &false.to_variant());
         {
             let btn = btn.clone();
             action.connect_activate(move |a, _| {
@@ -114,12 +110,7 @@ fn apply_driving_split(paned: &gtk::Paned, panel_w: i32) {
 /// Append a "Self Driving" entry to a menu (hamburger / menubar section).
 pub fn append_driving_menu_item(icons: &mut gtk_theme::IconMenu, menu: &gio::Menu) {
     let _ = ensure_drive_icon();
-    icons.append(
-        menu,
-        "Self Driving",
-        "win.driving-mode",
-        DRIVE_ICON_NAME,
-    );
+    icons.append(menu, "Self Driving", "win.driving-mode", DRIVE_ICON_NAME);
 }
 
 /// Build Self Driving UI (panel starts hidden).
@@ -197,8 +188,7 @@ pub fn attach_drive_button(header: &gtk::HeaderBar, ctx: DriveContext) {
     let mode = create_driving_mode(ctx);
     header.pack_end(&mode.button);
     unsafe {
-        mode.button
-            .set_data("gtk-neuron-driving-panel", mode.panel);
+        mode.button.set_data("gtk-neuron-driving-panel", mode.panel);
     }
 }
 
@@ -244,9 +234,7 @@ fn build_driving_panel(ctx: DriveContext) -> gtk::Box {
     title_row.append(&title);
     root.append(&title_row);
 
-    let blurb = gtk::Label::new(Some(
-        "AI can operate this app through its capability API",
-    ));
+    let blurb = gtk::Label::new(Some("AI can operate this app through its capability API"));
     blurb.set_wrap(true);
     blurb.set_xalign(0.0);
     blurb.add_css_class("dim-label");
@@ -470,10 +458,7 @@ fn show_driving_help(
         .default_width(560)
         .default_height(640)
         .build();
-    if let Some(win) = parent
-        .root()
-        .and_then(|r| r.downcast::<gtk::Window>().ok())
-    {
+    if let Some(win) = parent.root().and_then(|r| r.downcast::<gtk::Window>().ok()) {
         dialog.set_transient_for(Some(&win));
         dialog.set_destroy_with_parent(true);
     }

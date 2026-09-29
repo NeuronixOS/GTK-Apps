@@ -3,8 +3,8 @@
 //! Mirrors gnome-terminal's TerminalFindBar: entry + up/down + options
 //! (match case, whole words, regex) with Escape to dismiss.
 
-use gtk4 as gtk;
 use gtk::prelude::*;
+use gtk4 as gtk;
 use vte4::prelude::*;
 
 /// Build the search bar UI and wire it to the given terminal getter.
@@ -18,12 +18,8 @@ pub fn build_find_bar() -> (gtk::Revealer, gtk::Box) {
         .primary_icon_name("edit-find-symbolic")
         .build();
 
-    let match_case = gtk::CheckButton::builder()
-        .label("Match Case")
-        .build();
-    let whole_words = gtk::CheckButton::builder()
-        .label("Whole Words")
-        .build();
+    let match_case = gtk::CheckButton::builder().label("Match Case").build();
+    let whole_words = gtk::CheckButton::builder().label("Whole Words").build();
     let use_regex = gtk::CheckButton::builder()
         .label("Regular Expression")
         .build();
@@ -33,9 +29,7 @@ pub fn build_find_bar() -> (gtk::Revealer, gtk::Box) {
     opts_box.append(&whole_words);
     opts_box.append(&use_regex);
 
-    let opts_popover = gtk::Popover::builder()
-        .child(&opts_box)
-        .build();
+    let opts_popover = gtk::Popover::builder().child(&opts_box).build();
 
     let opts_btn = gtk::MenuButton::builder()
         .icon_name("emblem-system-symbolic")

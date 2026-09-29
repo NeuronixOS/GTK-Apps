@@ -86,7 +86,9 @@ pub fn chat_gemini(
 
     // Collect all text parts (some responses split across parts).
     let mut out = String::new();
-    if let Some(parts) = v.pointer("/candidates/0/content/parts").and_then(|p| p.as_array())
+    if let Some(parts) = v
+        .pointer("/candidates/0/content/parts")
+        .and_then(|p| p.as_array())
     {
         for part in parts {
             if let Some(t) = part.get("text").and_then(|t| t.as_str()) {

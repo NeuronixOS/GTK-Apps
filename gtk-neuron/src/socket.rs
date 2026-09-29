@@ -32,9 +32,7 @@ pub fn write_message(stream: &mut UnixStream, msg: &Message) -> Result<(), Strin
 
 pub fn read_message(stream: &mut UnixStream) -> Result<Message, String> {
     let mut len_buf = [0u8; 4];
-    stream
-        .read_exact(&mut len_buf)
-        .map_err(|e| e.to_string())?;
+    stream.read_exact(&mut len_buf).map_err(|e| e.to_string())?;
     let len = u32::from_be_bytes(len_buf) as usize;
     if len > 16 * 1024 * 1024 {
         return Err("frame too large".into());
