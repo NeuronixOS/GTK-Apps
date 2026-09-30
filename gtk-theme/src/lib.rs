@@ -320,7 +320,7 @@ pub struct WindowChrome {
 }
 
 fn default_border_size() -> u32 {
-    10
+    3
 }
 fn default_rounding() -> u32 {
     8

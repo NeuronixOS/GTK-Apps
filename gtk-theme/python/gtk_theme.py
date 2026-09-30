@@ -82,7 +82,7 @@ _custom_mtime: float | None = None
 
 @dataclass(frozen=True)
 class WindowChrome:
-    border_size: int = 10
+    border_size: int = 3
     rounding: int = 8
     bevel: str = "flat"
     gradient: str = "ltr"
@@ -110,9 +110,9 @@ def _parse_chrome(raw: object) -> WindowChrome:
     kit = str(buttons.get("kit") or raw.get("button_kit") or "gnome")
     glyphs = _BUTTON_KITS.get(kit, _BUTTON_KITS["gnome"])
     try:
-        border_size = int(raw.get("border_size") or 10)
+        border_size = int(raw.get("border_size") or 3)
     except (TypeError, ValueError):
-        border_size = 10
+        border_size = 3
     try:
         rounding = int(raw.get("rounding") or 8)
     except (TypeError, ValueError):
@@ -2553,7 +2553,7 @@ def _sync_fuzzel_colors(
     border: str,
     surface: str,
     accent: str,
-    border_size: int = 10,
+    border_size: int = 3,
     rounding: int = 8,
 ) -> None:
     path = _first_existing_config("fuzzel/fuzzel.ini")
