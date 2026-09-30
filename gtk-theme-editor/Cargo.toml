@@ -14,8 +14,7 @@ path = "src/main.rs"
 [dependencies]
 gtk4 = { version = "0.9", features = ["v4_10"] }
 gtk-theme = { path = "../gtk-theme" }
-# Unlocks cairo::ImageSurface::create_from_png for the 9-slice preview.
-cairo-rs = { version = "0.20", features = ["png"] }
+cairo-rs = "0.20"
 pangocairo = "0.20"
 
 [profile.release]

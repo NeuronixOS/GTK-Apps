@@ -18,7 +18,7 @@ use gtk::pango;
 use gtk::prelude::*;
 
 use gtk_theme::{
-    install_chrome_ninepatch, present_file_chooser, BUTTON_KITS, ChromeBevel, ChromeGradient,
+    BUTTON_KITS, ChromeBevel, ChromeGradient,
     ProfileData, WindowChrome,
 };
 
@@ -82,17 +82,14 @@ struct Ui {
     inactive_border_swatch: gtk::DrawingArea,
     chrome_preview: gtk::DrawingArea,
 
-    thickness: gtk::Scale,
-    rounding: gtk::Scale,
+    thickness: gtk::SpinButton,
+    rounding: gtk::SpinButton,
     gradient_dropdown: gtk::DropDown,
     bevel_dropdown: gtk::DropDown,
     kit_dropdown: gtk::DropDown,
     min_entry: gtk::Entry,
     max_entry: gtk::Entry,
     close_entry: gtk::Entry,
-    ninepatch_label: gtk::Label,
-    ninepatch_btn: gtk::Button,
-    ninepatch_clear: gtk::Button,
 
     delete_btn: gtk::Button,
     status: gtk::Label,
@@ -247,9 +244,6 @@ fn build_ui(app: &gtk::Application) {
         min_entry,
         max_entry,
         close_entry,
-        ninepatch_label,
-        ninepatch_btn,
-        ninepatch_clear,
         bar_btns,
         bar_hex,
         bar_inactive_btns,
@@ -385,9 +379,6 @@ fn build_ui(app: &gtk::Application) {
         min_entry,
         max_entry,
         close_entry,
-        ninepatch_label,
-        ninepatch_btn,
-        ninepatch_clear,
         delete_btn,
         status,
     });
@@ -547,28 +538,24 @@ fn gradient_pair_fields(
     (btns, hexes, section)
 }
 
-fn scale_row(label: &str, min: f64, max: f64, value: f64) -> (gtk::Scale, gtk::Box) {
-    let adj = gtk::Adjustment::new(value, min, max, 1.0, 4.0, 0.0);
-    let scale = gtk::Scale::new(gtk::Orientation::Horizontal, Some(&adj));
-    scale.set_digits(0);
-    scale.set_draw_value(true);
-    scale.set_hexpand(true);
-    scale.set_value_pos(gtk::PositionType::Right);
-    let row = field_row(label, &scale);
-    (scale, row)
+fn spin_row(label: &str, min: f64, max: f64, value: f64) -> (gtk::SpinButton, gtk::Box) {
+    let adj = gtk::Adjustment::new(value, min, max, 1.0, 5.0, 0.0);
+    let spin = gtk::SpinButton::new(Some(&adj), 1.0, 0);
+    spin.set_numeric(true);
+    spin.set_snap_to_ticks(true);
+    spin.set_width_chars(4);
+    let row = field_row(label, &spin);
+    (spin, row)
 }
 
 fn build_chrome_fields() -> (
-    gtk::Scale,
-    gtk::Scale,
+    gtk::SpinButton,
+    gtk::SpinButton,
     gtk::DropDown,
     gtk::DropDown,
     gtk::Entry,
     gtk::Entry,
     gtk::Entry,
-    gtk::Label,
-    gtk::Button,
-    gtk::Button,
     Vec<gtk::ColorDialogButton>,
     Vec<gtk::Entry>,
     Vec<gtk::ColorDialogButton>,
@@ -581,12 +568,12 @@ fn build_chrome_fields() -> (
     heading.add_css_class("heading");
     section.append(&heading);
     let hint = wrap_hint(
-        "Thickness and rounding apply to every Hyprland window. Corners stay arcs at the current radius (parametric 9-cell). − □ × are hyprbars font glyphs.",
+        "Border size and rounding apply to every Hyprland window. − □ × are hyprbars font glyphs.",
     );
     section.append(&hint);
 
-    let (thickness, thick_row) = scale_row("Thickness", 1.0, 32.0, 10.0);
-    let (rounding, round_row) = scale_row("Rounding", 0.0, 32.0, 8.0);
+    let (thickness, thick_row) = spin_row("Border size", 0.0, 20.0, 3.0);
+    let (rounding, round_row) = spin_row("Rounding", 0.0, 20.0, 8.0);
     section.append(&thick_row);
     section.append(&round_row);
 
@@ -628,25 +615,6 @@ fn build_chrome_fields() -> (
     glyphs.append(&close_entry);
     section.append(&field_row("Glyphs", &glyphs));
 
-    let nine_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let nine_btn = gtk::Button::with_label("9-patch PNG…");
-    nine_btn.set_tooltip_text(Some(
-        "Import an Android-style .9.png. Apply to Suite paints it around real windows.",
-    ));
-    let ninepatch_label = gtk::Label::new(Some("No PNG (parametric)"));
-    ninepatch_label.set_xalign(0.0);
-    ninepatch_label.set_hexpand(true);
-    ninepatch_label.add_css_class("dim-label");
-    ninepatch_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-    let nine_clear = gtk::Button::with_label("Clear");
-    nine_clear.set_tooltip_text(Some(
-        "Drop the PNG and restore the parametric Hyprland border",
-    ));
-    nine_row.append(&nine_btn);
-    nine_row.append(&nine_clear);
-    nine_row.append(&ninepatch_label);
-    section.append(&nine_row);
-
     (
         thickness,
         rounding,
@@ -655,9 +623,6 @@ fn build_chrome_fields() -> (
         min_entry,
         max_entry,
         close_entry,
-        ninepatch_label,
-        nine_btn,
-        nine_clear,
         bar_btns,
         bar_hex,
         bar_inactive_btns,
@@ -1104,7 +1069,6 @@ fn load_into_fields(ui: &Rc<Ui>, data: ProfileData) {
     ui.min_entry.set_text(&chrome.buttons.minimize);
     ui.max_entry.set_text(&chrome.buttons.maximize);
     ui.close_entry.set_text(&chrome.buttons.close);
-    set_ninepatch_label(ui, chrome.ninepatch.as_deref());
     *ui.working.borrow_mut() = seeded;
     ui.updating.set(false);
     apply_live(ui);
@@ -1183,13 +1147,6 @@ fn preview_border_if_needed(ui: &Rc<Ui>, field: Field) {
         Field::ActiveBorder(_) | Field::InactiveBorder(_) | Field::Bar(_) | Field::BarInactive(_)
     ) {
         gtk_theme::preview_window_border(&ui.working.borrow());
-    }
-}
-
-fn set_ninepatch_label(ui: &Ui, path: Option<&str>) {
-    match path {
-        Some(p) if !p.is_empty() => ui.ninepatch_label.set_text(p),
-        _ => ui.ninepatch_label.set_text("No PNG (parametric)"),
     }
 }
 
@@ -1275,52 +1232,6 @@ fn wire_chrome(ui: &Rc<Ui>) {
     wire_glyph_entry(ui, &ui.min_entry, |c, v| c.buttons.minimize = v);
     wire_glyph_entry(ui, &ui.max_entry, |c, v| c.buttons.maximize = v);
     wire_glyph_entry(ui, &ui.close_entry, |c, v| c.buttons.close = v);
-    {
-        let btn = ui.ninepatch_btn.clone();
-        let ui = ui.clone();
-        btn.connect_clicked(move |_| {
-            let filter = gtk::FileFilter::new();
-            filter.add_mime_type("image/png");
-            filter.set_name(Some("PNG image"));
-            let window = ui.window.clone();
-            let ui = ui.clone();
-            present_file_chooser(
-                Some(&window),
-                "9-patch PNG",
-                gtk::FileChooserAction::Open,
-                "Open",
-                Some(&filter),
-                None,
-                move |file| {
-                    let Some(file) = file else {
-                        return;
-                    };
-                    let Some(path) = file.path() else {
-                        return;
-                    };
-                    let id = ui.working.borrow().id.clone();
-                    if let Some(dest) = install_chrome_ninepatch(&id, &path) {
-                        let shown = dest.display().to_string();
-                        ui.working.borrow_mut().chrome_mut().ninepatch = Some(shown.clone());
-                        set_ninepatch_label(&ui, Some(&shown));
-                        apply_live(&ui);
-                    }
-                },
-            );
-        });
-    }
-    {
-        let btn = ui.ninepatch_clear.clone();
-        let ui = ui.clone();
-        btn.connect_clicked(move |_| {
-            if ui.updating.get() {
-                return;
-            }
-            ui.working.borrow_mut().chrome_mut().ninepatch = None;
-            set_ninepatch_label(&ui, None);
-            apply_live(&ui);
-        });
-    }
 }
 
 fn wire_glyph_entry(ui: &Rc<Ui>, entry: &gtk::Entry, set: fn(&mut WindowChrome, String)) {
@@ -1518,15 +1429,6 @@ fn draw_window_chrome(cr: &cairo::Context, w: i32, h: i32, data: &ProfileData) {
     let fw = (w as f64 - pad * 2.0 - stack).max(48.0);
     let fh = (h as f64 - pad * 2.0 - stack).max(56.0);
 
-    let mut nine: Option<(cairo::ImageSurface, i32, i32, i32, i32, bool)> = None;
-    if let Some(path) = chrome.ninepatch.as_deref() {
-        if let Some(mut surf) = load_png_surface(path) {
-            let insets = nine_slice_insets(&mut surf);
-            nine = Some((surf, insets.0, insets.1, insets.2, insets.3, insets.4));
-        }
-    }
-    let nine_ref = nine.as_ref();
-
     paint_fake_window(
         cr,
         pad + stack,
@@ -1540,7 +1442,6 @@ fn draw_window_chrome(cr: &cairo::Context, w: i32, h: i32, data: &ProfileData) {
         rgb_of(&i1),
         "Inactive",
         false,
-        nine_ref,
     );
     paint_fake_window(
         cr,
@@ -1555,7 +1456,6 @@ fn draw_window_chrome(cr: &cairo::Context, w: i32, h: i32, data: &ProfileData) {
         rgb_of(&a1),
         "Window",
         true,
-        nine_ref,
     );
 }
 
@@ -1572,7 +1472,6 @@ fn paint_fake_window(
     inner_col: (f64, f64, f64),
     title: &str,
     focused: bool,
-    nine: Option<&(cairo::ImageSurface, i32, i32, i32, i32, bool)>,
 ) {
     let thickness = chrome.border_size as f64;
     let radius = chrome.rounding as f64;
@@ -1584,23 +1483,7 @@ fn paint_fake_window(
         mix_rgb(bg, (0.0, 0.0, 0.0), 0.08)
     };
 
-    let mut used_nine = false;
-    let nine_inset = nine.map(|(_, left, top, right, bottom, _)| {
-        (*left).max(*top).max(*right).max(*bottom) as f64
-    });
-    if let Some((surf, left, top, right, bottom, skip_guide)) = nine {
-        draw_nine_slice(
-            cr, surf, x, y, fw, fh, *left, *top, *right, *bottom, *skip_guide,
-        );
-        used_nine = true;
-        if !focused {
-            rounded_rect(cr, x, y, fw, fh, radius);
-            cr.set_source_rgba(fill.0, fill.1, fill.2, 0.35);
-            let _ = cr.fill();
-        }
-    }
-
-    if !used_nine {
+    {
         rounded_rect(cr, x, y, fw, fh, radius);
         cr.set_source_rgb(fill.0, fill.1, fill.2);
         let _ = cr.fill();
@@ -1678,22 +1561,10 @@ fn paint_fake_window(
         if focused {
             draw_nine_cell_guides(cr, x, y, fw, fh, thickness, radius, fg);
         }
-    } else {
-        let inset = nine_inset.unwrap_or(thickness).max(4.0);
-        rounded_rect(
-            cr,
-            x + inset,
-            y + inset,
-            (fw - inset * 2.0).max(1.0),
-            (fh - inset * 2.0).max(1.0),
-            (radius - 2.0).max(0.0),
-        );
-        cr.set_source_rgb(fill.0, fill.1, fill.2);
-        let _ = cr.fill();
     }
 
     let bar_h = 22.0;
-    let bar_inset = nine_inset.unwrap_or_else(|| thickness.max(2.0)).max(2.0);
+    let bar_inset = thickness.max(2.0);
     let inner_x = x + bar_inset;
     let inner_y = y + bar_inset;
     let inner_w = (fw - bar_inset * 2.0).max(8.0);
@@ -1760,166 +1631,3 @@ fn draw_nine_cell_guides(
     cr.set_dash(&[], 0.0);
 }
 
-fn load_png_surface(path: &str) -> Option<cairo::ImageSurface> {
-    let mut file = std::fs::File::open(path).ok()?;
-    cairo::ImageSurface::create_from_png(&mut file).ok()
-}
-
-/// Returns (left, top, right, bottom, skip_1px_guide). Guide pixels are the
-/// Android 9-patch black lines on the outer edge; otherwise use equal thirds.
-fn nine_slice_insets(surf: &mut cairo::ImageSurface) -> (i32, i32, i32, i32, bool) {
-    let w = surf.width();
-    let h = surf.height();
-    let third_x = (w.max(3) / 3).max(1);
-    let third_y = (h.max(3) / 3).max(1);
-    let fallback = (third_x, third_y, third_x, third_y, false);
-    if w < 4 || h < 4 {
-        return fallback;
-    }
-    let stride = surf.stride();
-    let Ok(data) = surf.data() else {
-        return fallback;
-    };
-    let is_black = |x: i32, y: i32| -> bool {
-        let i = (y * stride + x * 4) as usize;
-        if i + 3 >= data.len() {
-            return false;
-        }
-        let (b, g, r, a) = (data[i], data[i + 1], data[i + 2], data[i + 3]);
-        a > 200 && r < 40 && g < 40 && b < 40
-    };
-    let mut first_x = None;
-    let mut last_x = None;
-    for x in 1..w - 1 {
-        if is_black(x, 0) {
-            first_x.get_or_insert(x);
-            last_x = Some(x);
-        }
-    }
-    let mut first_y = None;
-    let mut last_y = None;
-    for y in 1..h - 1 {
-        if is_black(0, y) {
-            first_y.get_or_insert(y);
-            last_y = Some(y);
-        }
-    }
-    match (first_x, last_x, first_y, last_y) {
-        (Some(fx), Some(lx), Some(fy), Some(ly)) => {
-            let inner_w = w - 2;
-            let inner_h = h - 2;
-            let left = (fx - 1).max(1);
-            let top = (fy - 1).max(1);
-            let right = (inner_w - (lx - 1)).max(1);
-            let bottom = (inner_h - (ly - 1)).max(1);
-            (left, top, right, bottom, true)
-        }
-        _ => fallback,
-    }
-}
-
-fn draw_nine_slice(
-    cr: &cairo::Context,
-    surf: &cairo::ImageSurface,
-    dx: f64,
-    dy: f64,
-    dw: f64,
-    dh: f64,
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-    skip_guide: bool,
-) {
-    let sw = surf.width() as f64;
-    let sh = surf.height() as f64;
-    let (sx0, sy0, src_w, src_h) = if skip_guide {
-        (1.0, 1.0, (sw - 2.0).max(1.0), (sh - 2.0).max(1.0))
-    } else {
-        (0.0, 0.0, sw, sh)
-    };
-    let l = (left as f64).min(src_w / 2.0).max(1.0);
-    let t = (top as f64).min(src_h / 2.0).max(1.0);
-    let r = (right as f64).min(src_w / 2.0).max(1.0);
-    let b = (bottom as f64).min(src_h / 2.0).max(1.0);
-    let mid_src_w = (src_w - l - r).max(1.0);
-    let mid_src_h = (src_h - t - b).max(1.0);
-    let mid_dst_w = (dw - l - r).max(1.0);
-    let mid_dst_h = (dh - t - b).max(1.0);
-
-    let cells = [
-        (sx0, sy0, l, t, dx, dy, l, t),
-        (sx0 + l, sy0, mid_src_w, t, dx + l, dy, mid_dst_w, t),
-        (sx0 + l + mid_src_w, sy0, r, t, dx + l + mid_dst_w, dy, r, t),
-        (sx0, sy0 + t, l, mid_src_h, dx, dy + t, l, mid_dst_h),
-        (
-            sx0 + l,
-            sy0 + t,
-            mid_src_w,
-            mid_src_h,
-            dx + l,
-            dy + t,
-            mid_dst_w,
-            mid_dst_h,
-        ),
-        (
-            sx0 + l + mid_src_w,
-            sy0 + t,
-            r,
-            mid_src_h,
-            dx + l + mid_dst_w,
-            dy + t,
-            r,
-            mid_dst_h,
-        ),
-        (sx0, sy0 + t + mid_src_h, l, b, dx, dy + t + mid_dst_h, l, b),
-        (
-            sx0 + l,
-            sy0 + t + mid_src_h,
-            mid_src_w,
-            b,
-            dx + l,
-            dy + t + mid_dst_h,
-            mid_dst_w,
-            b,
-        ),
-        (
-            sx0 + l + mid_src_w,
-            sy0 + t + mid_src_h,
-            r,
-            b,
-            dx + l + mid_dst_w,
-            dy + t + mid_dst_h,
-            r,
-            b,
-        ),
-    ];
-    for (sx, sy, sw, sh, dx, dy, dw, dh) in cells {
-        blit_scaled(cr, surf, sx, sy, sw, sh, dx, dy, dw, dh);
-    }
-}
-
-fn blit_scaled(
-    cr: &cairo::Context,
-    surf: &cairo::ImageSurface,
-    sx: f64,
-    sy: f64,
-    sw: f64,
-    sh: f64,
-    dx: f64,
-    dy: f64,
-    dw: f64,
-    dh: f64,
-) {
-    if sw <= 0.0 || sh <= 0.0 || dw <= 0.0 || dh <= 0.0 {
-        return;
-    }
-    let _ = cr.save();
-    cr.rectangle(dx, dy, dw, dh);
-    cr.clip();
-    cr.translate(dx, dy);
-    cr.scale(dw / sw, dh / sh);
-    let _ = cr.set_source_surface(surf, -sx, -sy);
-    let _ = cr.paint();
-    let _ = cr.restore();
-}

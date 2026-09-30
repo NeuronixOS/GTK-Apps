@@ -85,7 +85,7 @@ class WindowChrome:
     border_size: int = 3
     rounding: int = 8
     bevel: str = "flat"
-    gradient: str = "ltr"
+    gradient: str = "rtl"
     bar: Optional[tuple[str, str]] = None
     bar_inactive: Optional[tuple[str, str]] = None
     button_size: int = 18
@@ -93,7 +93,6 @@ class WindowChrome:
     minimize: str = "−"
     maximize: str = "□"
     close: str = "×"
-    ninepatch: Optional[str] = None
 
 
 _BUTTON_KITS = {
@@ -124,7 +123,7 @@ def _parse_chrome(raw: object) -> WindowChrome:
     bevel = str(raw.get("bevel") or "flat")
     if bevel not in ("flat", "inner", "double"):
         bevel = "flat"
-    gradient = str(raw.get("gradient") or "ltr").lower().replace("-", "_")
+    gradient = str(raw.get("gradient") or "rtl").lower().replace("-", "_")
     if gradient in ("rtl", "right_left", "right_to_left"):
         gradient = "rtl"
     else:
@@ -143,11 +142,9 @@ def _parse_chrome(raw: object) -> WindowChrome:
         b = _normalize_hex(ibar_raw[1]) if len(ibar_raw) > 1 else a
         if a:
             bar_inactive = (a, b or a)
-    nine = raw.get("ninepatch")
-    ninepatch = nine if isinstance(nine, str) and nine.strip() else None
     return WindowChrome(
-        border_size=max(1, min(32, border_size)),
-        rounding=max(0, min(48, rounding)),
+        border_size=max(0, min(20, border_size)),
+        rounding=max(0, min(20, rounding)),
         bevel=bevel,
         gradient=gradient,
         bar=bar,
@@ -157,7 +154,6 @@ def _parse_chrome(raw: object) -> WindowChrome:
         minimize=str(buttons.get("minimize") or glyphs[0]),
         maximize=str(buttons.get("maximize") or glyphs[1]),
         close=str(buttons.get("close") or glyphs[2]),
-        ninepatch=ninepatch,
     )
 
 
@@ -1148,14 +1144,6 @@ def _hyprctl_dispatch(name: str, args: str) -> None:
         pass
 
 
-def _active_ninepatch_path() -> Path:
-    return _THEME_DIR / "chrome" / "border-9.png"
-
-
-def _sync_hypr_ninepatch(_chrome: WindowChrome) -> None:
-    return
-
-
 def _hyprctl_hyprbarsgradient(args: str) -> None:
     if not shutil.which("hyprctl"):
         return
@@ -1219,7 +1207,6 @@ def sync_shell_chrome(profile: Optional[Profile] = None) -> bool:
     if active and inactive:
         _sync_hypr_window_borders(active, inactive, profile.border_hex())
     _sync_hypr_window_geometry(chrome.border_size, chrome.rounding)
-    _sync_hypr_ninepatch(chrome)
     _sync_hypr_workspace_background(bg)
     _sync_gtk_term_colors(profile)
     _sync_gtk_user_css(profile)
@@ -2587,7 +2574,7 @@ def _hex_to_hypr_rgba(hex_color: str, alpha: str) -> Optional[str]:
     return f"rgba({h.lower()}{alpha})"
 
 
-def _hypr_gradient(a: str, b: str, direction: str = "ltr") -> Optional[str]:
+def _hypr_gradient(a: str, b: str, direction: str = "rtl") -> Optional[str]:
     left, right = (b, a) if direction == "rtl" else (a, b)
     aa = _hex_to_hypr_rgba(left, "ff")
     bb = _hex_to_hypr_rgba(right, "ff")
@@ -2650,22 +2637,6 @@ def _sync_hypr_window_geometry(border_size: int, rounding: int) -> None:
     if not _theme_session_safe():
         _hyprctl_keyword("general:border_size", size)
         _hyprctl_keyword("decoration:rounding", round_s)
-
-
-def install_chrome_ninepatch(profile_id: str, src: str | Path) -> Optional[Path]:
-    """Copy a 9-slice PNG into ``~/.config/gtk-apps/chrome/<id>/border-9.png``."""
-    ident = (profile_id or "").strip()
-    src_path = Path(src)
-    if not ident or not src_path.is_file():
-        return None
-    dest_dir = _THEME_DIR / "chrome" / ident
-    try:
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / "border-9.png"
-        shutil.copy2(src_path, dest)
-        return dest
-    except OSError:
-        return None
 
 
 # ---------------------------------------------------------------------------

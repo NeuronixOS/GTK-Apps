@@ -19,7 +19,7 @@ pub use neuron_daemon::ensure_neuron_daemon;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -144,7 +144,7 @@ pub struct ProfileData {
     /// Unfocused window outline — two `#rrggbb` stops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border_inactive: Option<Vec<String>>,
-    /// Thickness, rounding, hyprbars − □ × glyphs, optional 9-patch PNG.
+    /// Thickness, rounding, and hyprbars − □ × glyphs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chrome: Option<WindowChrome>,
 }
@@ -195,8 +195,8 @@ impl ChromeBevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ChromeGradient {
-    #[default]
     Ltr,
+    #[default]
     Rtl,
 }
 
@@ -314,9 +314,6 @@ pub struct WindowChrome {
     pub bar_inactive: Option<Vec<String>>,
     #[serde(default)]
     pub buttons: ChromeButtons,
-    /// Optional 9-slice PNG path (unused; kept for profile compatibility).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ninepatch: Option<String>,
 }
 
 fn default_border_size() -> u32 {
@@ -332,19 +329,18 @@ impl Default for WindowChrome {
             border_size: default_border_size(),
             rounding: default_rounding(),
             bevel: ChromeBevel::Flat,
-            gradient: ChromeGradient::Ltr,
+            gradient: ChromeGradient::Rtl,
             bar: None,
             bar_inactive: None,
             buttons: ChromeButtons::default(),
-            ninepatch: None,
         }
     }
 }
 
 impl WindowChrome {
     pub fn clamp(&mut self) {
-        self.border_size = self.border_size.clamp(1, 32);
-        self.rounding = self.rounding.min(48);
+        self.border_size = self.border_size.clamp(0, 20);
+        self.rounding = self.rounding.min(20);
         self.buttons.size = self.buttons.size.clamp(10, 36);
         if self.buttons.minimize.trim().is_empty() {
             self.buttons.minimize = default_minimize();
@@ -2665,7 +2661,6 @@ pub fn sync_shell_chrome(profile: &Profile) {
         sync_hypr_window_borders(&active, &inactive, &profile.border_hex());
     }
     sync_hypr_window_geometry(chrome.border_size, chrome.rounding);
-    sync_hypr_ninepatch(&chrome);
     sync_hypr_workspace_background(bg);
     sync_gtk_term_colors(profile);
     sync_gtk_user_css(profile);
@@ -2753,21 +2748,6 @@ fn preview_hyprbars_fill(data: &ProfileData, chrome: &WindowChrome) {
     hyprctl_keyword("plugin:hyprbars:bar_color", &c0);
     apply_hyprbars_fill(&c0, &c1, &ic0, &ic1, chrome.gradient.as_id());
 }
-
-/// Copy a 9-slice PNG into `~/.config/gtk-apps/chrome/<id>/border-9.png`.
-pub fn install_chrome_ninepatch(profile_id: &str, src: &Path) -> Option<PathBuf> {
-    let id = profile_id.trim();
-    if id.is_empty() || !src.is_file() {
-        return None;
-    }
-    let dest_dir = theme_dir().join("chrome").join(id);
-    std::fs::create_dir_all(&dest_dir).ok()?;
-    let dest = dest_dir.join("border-9.png");
-    std::fs::copy(src, &dest).ok()?;
-    Some(dest)
-}
-
-fn sync_hypr_ninepatch(_chrome: &WindowChrome) {}
 
 fn config_candidates(rel: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
