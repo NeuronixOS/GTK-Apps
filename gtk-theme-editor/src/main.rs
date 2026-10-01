@@ -148,6 +148,21 @@ fn show_about(app: &gtk::Application) {
     about.present();
 }
 
+/// Profile id written by quick settings before launch. Absent means the live theme.
+fn startup_profile_id() -> String {
+    if let Some(home) = std::env::var_os("HOME") {
+        let path = std::path::PathBuf::from(home).join(".config/gtk-apps/editor-request");
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let _ = std::fs::remove_file(&path);
+            let id = text.trim().to_string();
+            if !id.is_empty() && gtk_theme::profile_data_by_id(&id).is_some() {
+                return id;
+            }
+        }
+    }
+    gtk_theme::load_theme_id()
+}
+
 fn build_ui(app: &gtk::Application) {
     // Start themed by the current suite profile.
     gtk_theme::apply_chrome(gtk_theme::load_profile());
@@ -341,7 +356,7 @@ fn build_ui(app: &gtk::Application) {
     window.set_child(Some(&root));
 
     // ---- assemble state + wiring --------------------------------------
-    let initial = gtk_theme::profile_data_by_id(&gtk_theme::load_theme_id())
+    let initial = gtk_theme::profile_data_by_id(&startup_profile_id())
         .unwrap_or_else(|| ProfileData::from_profile(gtk_theme::default_profile()));
 
     let ui = Rc::new(Ui {
