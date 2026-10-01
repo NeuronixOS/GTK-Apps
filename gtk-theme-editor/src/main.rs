@@ -403,7 +403,7 @@ fn build_ui(app: &gtk::Application) {
     refresh_dropdown(&ui, Some(&initial.id));
     load_into_fields(&ui, initial);
 
-    if let Some((_, _, w, h)) = screen_two_thirds() {
+    if let Some((_, _, w, h)) = screen_open_rect() {
         ui.window.set_default_size(w, h);
     } else {
         ui.window.set_default_size(EDITOR_WIDTH, EDITOR_HEIGHT);
@@ -417,13 +417,13 @@ fn build_ui(app: &gtk::Application) {
 // ---------------------------------------------------------------------------
 
 /// Hyprland restores the last floating size for this class. Float it, then
-/// keep it at two-thirds of the screen and centered until that restore settles.
+/// keep it at five-sixths of the screen and centered until that restore settles.
 fn snap_editor_window_size() {
     let attempts = Rc::new(Cell::new(0u32));
     glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
         let n = attempts.get();
         attempts.set(n + 1);
-        if let Some((tx, ty, tw, th)) = screen_two_thirds() {
+        if let Some((tx, ty, tw, th)) = screen_open_rect() {
             if let Some((floating, x, y, w, h)) = theme_editor_geom() {
                 let target = "class:^(org.neuronix.GtkThemeEditor)$";
                 if !floating {
@@ -445,11 +445,11 @@ fn snap_editor_window_size() {
     });
 }
 
-/// Focused monitor, two-thirds wide and tall, centered. `(x, y, w, h)`.
-fn screen_two_thirds() -> Option<(i32, i32, i32, i32)> {
+/// Focused monitor, five-sixths wide and tall, centered. `(x, y, w, h)`.
+fn screen_open_rect() -> Option<(i32, i32, i32, i32)> {
     let (mx, my, mw, mh) = focused_monitor()?;
-    let w = mw * 2 / 3;
-    let h = mh * 2 / 3;
+    let w = mw * 5 / 6;
+    let h = mh * 5 / 6;
     if w < 200 || h < 200 {
         return None;
     }
