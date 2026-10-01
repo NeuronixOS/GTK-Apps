@@ -403,8 +403,12 @@ fn build_ui(app: &gtk::Application) {
     refresh_dropdown(&ui, Some(&initial.id));
     load_into_fields(&ui, initial);
 
+    if let Some((_, _, w, h)) = screen_two_thirds() {
+        ui.window.set_default_size(w, h);
+    } else {
+        ui.window.set_default_size(EDITOR_WIDTH, EDITOR_HEIGHT);
+    }
     ui.window.present();
-    ui.window.set_default_size(EDITOR_WIDTH, EDITOR_HEIGHT);
     snap_editor_window_size();
 }
 
@@ -412,38 +416,76 @@ fn build_ui(app: &gtk::Application) {
 // layout helpers
 // ---------------------------------------------------------------------------
 
-/// Hyprland restores the last floating size for this class (often a stretched
-/// tile). Float once if needed, then keep requesting the design size until
-/// the compositor actually has the window — a single early dispatch is a no-op.
+/// Hyprland restores the last floating size for this class. Float it, then
+/// keep it at two-thirds of the screen and centered until that restore settles.
 fn snap_editor_window_size() {
     let attempts = Rc::new(Cell::new(0u32));
     glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
         let n = attempts.get();
         attempts.set(n + 1);
-        match theme_editor_geom() {
-            None => {}
-            Some((floating, w, h)) => {
+        if let Some((tx, ty, tw, th)) = screen_two_thirds() {
+            if let Some((floating, x, y, w, h)) = theme_editor_geom() {
+                let target = "class:^(org.neuronix.GtkThemeEditor)$";
                 if !floating {
-                    hyprctl_dispatch("setfloating", "class:^(org.neuronix.GtkThemeEditor)$");
+                    hyprctl_dispatch("setfloating", target);
                 }
-                if w != EDITOR_WIDTH || h != EDITOR_HEIGHT {
-                    hyprctl_dispatch(
-                        "resizewindowpixel",
-                        &format!(
-                            "exact {EDITOR_WIDTH} {EDITOR_HEIGHT},class:^(org.neuronix.GtkThemeEditor)$"
-                        ),
-                    );
+                if (w - tw).abs() > 4 || (h - th).abs() > 4 {
+                    hyprctl_dispatch("resizewindowpixel", &format!("exact {tw} {th},{target}"));
+                }
+                if (x - tx).abs() > 8 || (y - ty).abs() > 8 {
+                    hyprctl_dispatch("movewindowpixel", &format!("exact {tx} {ty},{target}"));
                 }
             }
         }
-        // Hyprland often maps at 960 then restores the last tiled/floating
-        // size a moment later — keep enforcing through that restore.
         if n >= 24 {
             glib::ControlFlow::Break
         } else {
             glib::ControlFlow::Continue
         }
     });
+}
+
+/// Focused monitor, two-thirds wide and tall, centered. `(x, y, w, h)`.
+fn screen_two_thirds() -> Option<(i32, i32, i32, i32)> {
+    let (mx, my, mw, mh) = focused_monitor()?;
+    let w = mw * 2 / 3;
+    let h = mh * 2 / 3;
+    if w < 200 || h < 200 {
+        return None;
+    }
+    Some((mx + (mw - w) / 2, my + (mh - h) / 2, w, h))
+}
+
+fn focused_monitor() -> Option<(i32, i32, i32, i32)> {
+    let text = hyprctl_stdout(&["monitors", "-j"])?;
+    let at = text.rfind("\"focused\": true")?;
+    let start = text[..at].rfind("\"id\":").unwrap_or(0);
+    let slice = &text[start..at];
+    Some((
+        json_i32(slice, "x")?,
+        json_i32(slice, "y")?,
+        json_i32(slice, "width")?,
+        json_i32(slice, "height")?,
+    ))
+}
+
+fn json_i32(slice: &str, key: &str) -> Option<i32> {
+    let pat = format!("\"{key}\":");
+    let at = slice.rfind(&pat)?;
+    let rest = slice[at + pat.len()..].trim_start();
+    let mut end = 0;
+    let bytes = rest.as_bytes();
+    if bytes.first() == Some(&b'-') {
+        end = 1;
+    }
+    let digits = end;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        end += 1;
+    }
+    if end == digits {
+        return None;
+    }
+    rest[..end].parse().ok()
 }
 
 fn hyprctl_dispatch(name: &str, args: &str) {
@@ -455,27 +497,38 @@ fn hyprctl_dispatch(name: &str, args: &str) {
         .status();
 }
 
-fn theme_editor_geom() -> Option<(bool, i32, i32)> {
+fn hyprctl_stdout(args: &[&str]) -> Option<String> {
     let out = std::process::Command::new("hyprctl")
-        .args(["-j", "clients"])
+        .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()
         .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
+    String::from_utf8(out.stdout).ok()
+}
+
+fn theme_editor_geom() -> Option<(bool, i32, i32, i32, i32)> {
+    let text = hyprctl_stdout(&["clients", "-j"])?;
     let idx = text.find("\"class\": \"org.neuronix.GtkThemeEditor\"")?;
-    let slice = &text[idx.saturating_sub(800)..idx];
+    let slice = &text[idx.saturating_sub(1600)..idx];
     let floating_at = slice.rfind("\"floating\":")?;
     let floating = slice[floating_at..].starts_with("\"floating\": true");
-    let size_at = slice.rfind("\"size\":")?;
-    let rest = &slice[size_at..];
+    let (x, y) = json_pair(slice, "at")?;
+    let (w, h) = json_pair(slice, "size")?;
+    Some((floating, x, y, w, h))
+}
+
+fn json_pair(slice: &str, key: &str) -> Option<(i32, i32)> {
+    let pat = format!("\"{key}\":");
+    let at = slice.rfind(&pat)?;
+    let rest = &slice[at..];
     let a = rest.find('[')?;
     let b = rest.find(']')?;
     let mut parts = rest[a + 1..b].split(',');
-    let w = parts.next()?.trim().parse().ok()?;
-    let h = parts.next()?.trim().parse().ok()?;
-    Some((floating, w, h))
+    let x = parts.next()?.trim().parse().ok()?;
+    let y = parts.next()?.trim().parse().ok()?;
+    Some((x, y))
 }
 
 fn wrap_hint(text: &str) -> gtk::Label {
