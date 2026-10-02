@@ -14,7 +14,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
-from gi.repository import Gio, GObject
+from gi.repository import Gio, GLib, GObject
 
 from meld.settings import load_settings_schema
 
@@ -51,9 +51,33 @@ class SavedWindowState(GObject.GObject):
         self.settings.bind("height", self, "height", bind_flags)
         self.settings.bind("is-maximized", self, "is-maximized", bind_flags)
 
-        window.set_default_size(self.props.width, self.props.height)
-        if self.props.is_maximized:
-            window.maximize()
+        # Saved size and maximize must not win. Every launch is fullscreen.
+        self._fullscreen_hold = True
+        self._enter_fullscreen(window)
+        window.connect("map", self._on_map_fullscreen)
+        for delay in (80, 250, 600, 1200):
+            GLib.timeout_add(delay, self._enter_fullscreen, window)
+        GLib.timeout_add(1600, self._release_fullscreen_hold)
+
+    def _release_fullscreen_hold(self):
+        self._fullscreen_hold = False
+        return False
+
+    def _on_map_fullscreen(self, window, *_args):
+        GLib.idle_add(self._enter_fullscreen, window)
+
+    def _enter_fullscreen(self, window):
+        if not getattr(self, "_fullscreen_hold", False):
+            return False
+        try:
+            if not window.is_fullscreen():
+                window.fullscreen()
+        except Exception:
+            pass
+        action = window.lookup_action("fullscreen")
+        if action is not None and window.is_fullscreen():
+            action.set_state(GLib.Variant.new_boolean(True))
+        return False
 
     def on_size_allocate(self, window, property):
         if not (self.props.is_maximized or self.props.is_fullscreen):

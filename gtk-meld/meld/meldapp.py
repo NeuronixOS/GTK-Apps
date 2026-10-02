@@ -70,7 +70,10 @@ class MeldApp(Adw.Application):
         self.new_window()
 
     def do_activate(self):
-        self.get_active_window().present()
+        window = self.get_active_window()
+        if window is not None:
+            window.fullscreen()
+            window.present()
 
     def do_command_line(self, command_line):
         return self.parse_args(command_line)
