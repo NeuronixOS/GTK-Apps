@@ -41,7 +41,7 @@ With no extra flags this script syncs into the sibling LinuxOS tree (next ISO)
 and, on a Neuronix/KvNix machine, into /usr/local (this computer).
 
 Apps: gtk-calc gtk-edit gtk-files gtk-image gtk-video gtk-term gtk-theme-editor
-      gtk-photos gtk-colors
+      gtk-photos gtk-colors gtk-calendar
 EOF
 }
 
@@ -79,6 +79,7 @@ ALL_APPS=(
   gtk-theme-editor
   gtk-photos
   gtk-colors
+  gtk-calendar
 )
 
 is_known_app() {
@@ -134,6 +135,9 @@ app_stop_spec() {
       ;;
     gtk-colors)
       echo "pattern:${ROOT}/gtk-colors/colors.py"
+      ;;
+    gtk-calendar)
+      echo "pattern:${ROOT}/gtk-calendar/app.py"
       ;;
     *)
       echo "pattern:${ROOT}/${app}"
