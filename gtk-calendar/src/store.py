@@ -40,6 +40,7 @@ class Store:
         self.google_client_secret = ""
         self.google_account = ""
         self.sources: list[CalendarSource] = []
+        self.hidden_events: list[dict[str, str]] = []
         self.load()
 
     def load(self) -> None:
@@ -71,6 +72,24 @@ class Store:
             if src is not None:
                 sources.append(src)
         self.sources = sources
+        hidden: list[dict[str, str]] = []
+        for item in raw.get("hidden_events") or []:
+            if isinstance(item, dict):
+                uid = str(item.get("uid") or "").strip()
+                if not uid:
+                    continue
+                    hidden.append(
+                    {
+                        "key": str(item.get("key") or "").strip(),
+                        "uid": uid,
+                        "title": str(item.get("title") or "Event").strip() or "Event",
+                        "source_id": str(item.get("source_id") or "").strip(),
+                        "when": str(item.get("when") or "").strip(),
+                    }
+                )
+            elif isinstance(item, str) and item.strip():
+                hidden.append({"uid": item.strip(), "title": "Event", "source_id": ""})
+        self.hidden_events = hidden
 
     def save(self) -> None:
         path = config_file()
@@ -84,6 +103,7 @@ class Store:
                 "account": self.google_account,
             },
             "sources": [src.to_json() for src in self.sources],
+            "hidden_events": self.hidden_events,
         }
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         _chmod_private(path)
@@ -152,3 +172,65 @@ class Store:
         dest.write_bytes(src_path.read_bytes())
         _chmod_private(dest)
         return dest
+
+    def hidden_keys(self) -> set[str]:
+        return {item["key"] for item in self.hidden_events if item.get("key")}
+
+    def is_hidden(
+        self,
+        key: str,
+        uid: str = "",
+        source_id: str = "",
+        title: str = "",
+        start: str = "",
+    ) -> bool:
+        title = title.strip()
+        start = start.strip()
+        if key and key in self.hidden_keys():
+            return True
+        for item in self.hidden_events:
+            if (item.get("title") or "").strip() != title:
+                continue
+            if (item.get("uid") or "") != uid:
+                continue
+            stored_src = item.get("source_id") or ""
+            if stored_src and stored_src != source_id:
+                continue
+            stored_start = (item.get("start") or "").strip()
+            if stored_start and stored_start != start:
+                continue
+            return True
+        return False
+
+    def hide_event(
+        self,
+        key: str,
+        uid: str,
+        title: str,
+        source_id: str = "",
+        when: str = "",
+        start: str = "",
+    ) -> None:
+        key = key.strip()
+        uid = uid.strip()
+        if not key or key in self.hidden_keys():
+            return
+        self.hidden_events.append(
+            {
+                "key": key,
+                "uid": uid,
+                "title": title.strip() or "Event",
+                "source_id": source_id.strip(),
+                "when": when.strip(),
+                "start": start.strip(),
+            }
+        )
+        self.save()
+
+    def unhide_event(self, key: str) -> None:
+        self.hidden_events = [
+            item
+            for item in self.hidden_events
+            if item.get("key") != key and item.get("uid") != key
+        ]
+        self.save()

@@ -127,6 +127,17 @@ class CalendarEvent:
             return "All day"
         return _clock(as_local(self.start))
 
+    def hide_key(self) -> str:
+        return "|".join(
+            (
+                self.source_id,
+                self.uid,
+                as_local(self.start).isoformat(),
+                as_local(self.end).isoformat(),
+                self.title.strip(),
+            )
+        )
+
 
 def _clock(value: datetime) -> str:
     hour12 = value.hour % 12 or 12

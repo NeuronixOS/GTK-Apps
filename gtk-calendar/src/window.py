@@ -608,6 +608,7 @@ class CalendarWindow(Gtk.ApplicationWindow):
         if not ev.all_day:
             line.add_css_class("cal-event-time")
         self._colorize(line, color)
+        target: Gtk.Widget = line
         if ev.all_day and span_role in ("start", "mid", "end"):
             wrap = Gtk.Box()
             wrap.set_hexpand(True)
@@ -615,8 +616,25 @@ class CalendarWindow(Gtk.ApplicationWindow):
             wrap.add_css_class(f"cal-span-{span_role}")
             wrap.append(line)
             self._style_span(wrap, span_role)
-            return wrap
-        return line
+            target = wrap
+        self._bind_event_click(target, ev)
+        return target
+
+    def _bind_event_click(self, widget: Gtk.Widget, ev: CalendarEvent) -> None:
+        gesture = Gtk.GestureClick()
+        gesture.set_button(1)
+        gesture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+
+        def pressed(gest: Gtk.GestureClick, *_args) -> None:
+            gest.set_state(Gtk.EventSequenceState.CLAIMED)
+            self._show_event(ev)
+
+        gesture.connect("pressed", pressed)
+        widget.add_controller(gesture)
+        try:
+            widget.set_cursor_from_name("pointer")
+        except Exception:
+            pass
 
     def _style_span(self, widget: Gtk.Widget, role: str) -> None:
         if role == "start":
@@ -955,20 +973,20 @@ class CalendarWindow(Gtk.ApplicationWindow):
         self._busy = False
         try:
             self.events = events
-            by_day: dict[date, list[CalendarEvent]] = {}
-            for ev in events:
-                for day in ev.iter_days():
-                    by_day.setdefault(day, []).append(ev)
-            self._events_by_day = by_day
+            self._index_events()
+            hidden_n = len(self.store.hidden_events)
             if errors and not events:
                 self._status.set_label(" · ".join(errors[:2]))
             elif not self.store.sources:
                 self._status.set_label("Add a Google or .ics calendar to see events.")
             else:
-                n = len(events)
+                n = len([ev for ev in events if not self._event_hidden(ev)])
                 extra = f" ({errors[0]})" if errors else ""
-                self._status.set_label(f"{n} event{'s' if n != 1 else ''} loaded.{extra}")
-            self._note(f"events={len(events)} days={len(by_day)} errors={errors!r}")
+                hidden_txt = f"  ·  {hidden_n} hidden" if hidden_n else ""
+                self._status.set_label(
+                    f"{n} event{'s' if n != 1 else ''} loaded.{hidden_txt}{extra}"
+                )
+            self._note(f"events={len(events)} days={len(self._events_by_day)} errors={errors!r}")
             self._rebuild_month()
         except Exception as exc:
             self._status.set_label(f"Could not display events: {exc}")
@@ -1046,14 +1064,102 @@ class CalendarWindow(Gtk.ApplicationWindow):
         return btn
 
     def _show_event(self, ev: CalendarEvent) -> None:
-        parts = [] if ev.all_day else [ev.time_label()]
-        parts.append(ev.source_name)
+        win = Gtk.Window(title=ev.title or "Event")
+        win.add_css_class("gtk-calendar")
+        win.set_transient_for(self)
+        win.set_modal(True)
+        win.set_default_size(440, 320)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+        box.set_margin_top(16)
+        box.set_margin_bottom(16)
+        win.set_child(box)
+
+        heading = Gtk.Label(label=ev.title)
+        heading.set_wrap(True)
+        heading.set_xalign(0)
+        heading.add_css_class("title-4")
+        box.append(heading)
+
+        meta_bits = [ev.time_label(), ev.source_name]
         if ev.location:
-            parts.append(ev.location)
-        detail = "\n".join(parts)
+            meta_bits.append(ev.location)
+        meta = Gtk.Label(label="\n".join(meta_bits))
+        meta.set_wrap(True)
+        meta.set_xalign(0)
+        meta.add_css_class("dim-label")
+        box.append(meta)
+
         if ev.description:
-            detail += "\n\n" + ev.description
-        _alert(self, ev.title, detail)
+            scrolled = Gtk.ScrolledWindow()
+            scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            scrolled.set_vexpand(True)
+            desc = Gtk.Label(label=ev.description)
+            desc.set_wrap(True)
+            desc.set_xalign(0)
+            desc.set_yalign(0)
+            desc.set_selectable(True)
+            scrolled.set_child(desc)
+            box.append(scrolled)
+
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        actions.set_halign(Gtk.Align.END)
+        hide_btn = Gtk.Button(label="Hide")
+        hide_btn.add_css_class("destructive-action")
+        hide_btn.set_tooltip_text("Hide this event from the calendar")
+        hide_btn.connect("clicked", lambda *_a, event=ev, dialog=win: self._hide_event(event, dialog))
+        close_btn = Gtk.Button(label="Close")
+        close_btn.connect("clicked", lambda *_: win.destroy())
+        actions.append(hide_btn)
+        actions.append(close_btn)
+        box.append(actions)
+        win.present()
+
+    def _event_hidden(self, ev: CalendarEvent) -> bool:
+        return self.store.is_hidden(
+            ev.hide_key(),
+            ev.uid,
+            ev.source_id,
+            ev.title,
+            as_local(ev.start).isoformat(),
+        )
+
+    def _refresh_status_count(self) -> None:
+        hidden_n = len(self.store.hidden_events)
+        n = len([item for item in self.events if not self._event_hidden(item)])
+        hidden_txt = f"  ·  {hidden_n} hidden" if hidden_n else ""
+        self._status.set_label(f"{n} event{'s' if n != 1 else ''} loaded.{hidden_txt}")
+
+    def _hide_event(self, ev: CalendarEvent, dialog: Gtk.Window | None = None) -> None:
+        self.store.hide_event(
+            ev.hide_key(),
+            ev.uid,
+            ev.title,
+            ev.source_id,
+            ev.time_label(),
+            as_local(ev.start).isoformat(),
+        )
+        if dialog is not None:
+            dialog.destroy()
+        self._index_events()
+        self._rebuild_month()
+        self._refresh_status_count()
+
+    def _index_events(self) -> None:
+        by_day: dict[date, list[CalendarEvent]] = {}
+        for ev in self.events:
+            if self._event_hidden(ev):
+                continue
+            for day in ev.iter_days():
+                by_day.setdefault(day, []).append(ev)
+        self._events_by_day = by_day
+
+    def _unhide_event(self, key: str) -> None:
+        self.store.unhide_event(key)
+        self._index_events()
+        self._rebuild_month()
+        self._refresh_status_count()
 
     def _on_event_activated(self, _list, row) -> None:
         ev = getattr(row, "_event", None)
@@ -1215,6 +1321,23 @@ class SourcesWindow(Gtk.Window):
         self.source_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         ibox.append(self.source_list)
         self._rebuild_source_rows()
+
+        hidden = Gtk.Frame(label="Hidden events")
+        box.append(hidden)
+        hbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        hbox.set_margin_start(12)
+        hbox.set_margin_end(12)
+        hbox.set_margin_top(12)
+        hbox.set_margin_bottom(12)
+        hidden.set_child(hbox)
+        hint = Gtk.Label(label="Click an event on the calendar, then Hide. Unhide restores it.")
+        hint.set_wrap(True)
+        hint.set_xalign(0)
+        hint.add_css_class("dim-label")
+        hbox.append(hint)
+        self.hidden_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        hbox.append(self.hidden_list)
+        self._rebuild_hidden_rows()
 
     def _sync_google_status(self) -> None:
         if not google_api.google_libs_available():
@@ -1398,6 +1521,39 @@ class SourcesWindow(Gtk.Window):
             return
         for src in self.store.sources:
             self.source_list.append(self._source_row(src))
+
+    def _rebuild_hidden_rows(self) -> None:
+        self.parent_win._clear_box(self.hidden_list)
+        hidden = list(self.store.hidden_events)
+        if not hidden:
+            empty = Gtk.Label(label="No hidden events")
+            empty.add_css_class("dim-label")
+            empty.set_xalign(0)
+            self.hidden_list.append(empty)
+            return
+        for item in hidden:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            label = item.get("title") or "Event"
+            when = item.get("when") or ""
+            if when:
+                label = f"{label}  ·  {when}"
+            name = Gtk.Label(label=label)
+            name.set_hexpand(True)
+            name.set_xalign(0)
+            name.set_ellipsize(Pango.EllipsizeMode.END)
+            row.append(name)
+            show = Gtk.Button(label="Unhide")
+            ident = item.get("key") or item.get("uid") or ""
+            show.connect(
+                "clicked",
+                lambda *_a, hid=ident: self._unhide(hid),
+            )
+            row.append(show)
+            self.hidden_list.append(row)
+
+    def _unhide(self, uid: str) -> None:
+        self.parent_win._unhide_event(uid)
+        self._rebuild_hidden_rows()
 
     def _source_row(self, src: CalendarSource) -> Gtk.Widget:
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
