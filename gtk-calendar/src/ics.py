@@ -17,6 +17,56 @@ from .paths import ics_cache_file
 _UNFOLD = re.compile(r"\r?\n[ \t]")
 _DOW = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
 
+
+def _parse_byday_tokens(raw: str) -> list[tuple[int | None, int]]:
+    """Parse RRULE BYDAY into (nth, weekday) pairs. nth is 1..4, -1..-4, or None."""
+    specs: list[tuple[int | None, int]] = []
+    for token in (raw or "").split(","):
+        token = token.strip().upper()
+        if len(token) < 2 or token[-2:] not in _DOW:
+            continue
+        prefix = token[:-2]
+        nth = int(prefix) if prefix else None
+        specs.append((nth, _DOW[token[-2:]]))
+    return specs
+
+
+def _weekdays_in_month(year: int, month: int, weekday: int) -> list[date]:
+    first = date(year, month, 1)
+    cur = first + timedelta(days=(weekday - first.weekday()) % 7)
+    days: list[date] = []
+    while cur.month == month:
+        days.append(cur)
+        cur += timedelta(days=7)
+    return days
+
+
+def _nth_weekday_of_month(year: int, month: int, nth: int, weekday: int) -> date | None:
+    days = _weekdays_in_month(year, month, weekday)
+    if not days:
+        return None
+    if nth > 0:
+        return days[nth - 1] if nth <= len(days) else None
+    idx = len(days) + nth
+    return days[idx] if 0 <= idx < len(days) else None
+
+
+def _byday_dates_in_month(year: int, month: int, specs: list[tuple[int | None, int]]) -> list[date]:
+    found: set[date] = set()
+    for nth, weekday in specs:
+        if nth is None:
+            found.update(_weekdays_in_month(year, month, weekday))
+        else:
+            day = _nth_weekday_of_month(year, month, nth, weekday)
+            if day is not None:
+                found.add(day)
+    return sorted(found)
+
+
+def _shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
+    total = year * 12 + (month - 1) + delta
+    return total // 12, total % 12 + 1
+
 # Outlook / Windows TZID → IANA (the Windows names include DST).
 _WIN_TZ = {
     "utc": "UTC",
@@ -383,6 +433,14 @@ def _expand_rrule_stdlib(
     until, _ = _parse_dt(params.get("UNTIL") or "")
     count = int(params["COUNT"]) if params.get("COUNT") else None
     bydays = [_DOW[d[-2:]] for d in (params.get("BYDAY") or "").split(",") if d[-2:] in _DOW]
+    byday_specs = _parse_byday_tokens(params.get("BYDAY") or "")
+    bymonths: list[int] = []
+    for part in (params.get("BYMONTH") or "").split(","):
+        part = part.strip()
+        if part.isdigit():
+            month_n = int(part)
+            if 1 <= month_n <= 12:
+                bymonths.append(month_n)
     tz = start.tzinfo or LOCAL_TZ
     cursor = start
     emitted = 0
@@ -404,6 +462,9 @@ def _expand_rrule_stdlib(
         emitted += 1
         return count is None or emitted < count
 
+    def at_time(day: date) -> datetime:
+        return datetime(day.year, day.month, day.day, start.hour, start.minute, start.second, tzinfo=tz)
+
     if freq == "WEEKLY" and bydays:
         week0 = start.date() - timedelta(days=start.weekday())
         day = window_start.date() - timedelta(days=14)
@@ -413,11 +474,49 @@ def _expand_rrule_stdlib(
             if day.weekday() in bydays:
                 weeks = (day - week0).days // 7
                 if weeks >= 0 and weeks % interval == 0:
-                    occ = datetime(day.year, day.month, day.day, start.hour, start.minute, start.second, tzinfo=tz)
+                    occ = at_time(day)
                     if occ + duration >= start:
                         if not accept(occ):
                             break
             day += timedelta(days=1)
+        return out
+
+    if freq == "MONTHLY" and byday_specs:
+        year, month = start.year, start.month
+        months_from_start = 0
+        last_pair = (until.year, until.month) if until else (window_end.year + 1, window_end.month)
+        while (year, month) <= last_pair and emitted < limit and guard < 4000:
+            guard += 1
+            if months_from_start % interval == 0:
+                for day in _byday_dates_in_month(year, month, byday_specs):
+                    occ = at_time(day)
+                    if occ + duration >= start:
+                        if not accept(occ):
+                            return out
+            year, month = _shift_month(year, month, 1)
+            months_from_start += 1
+            if count is None and datetime(year, month, 1, tzinfo=tz) > window_end + timedelta(days=370):
+                break
+        return out
+
+    if freq == "YEARLY" and byday_specs:
+        months = bymonths or [start.month]
+        year = start.year
+        years_from_start = 0
+        last_year = until.year if until else window_end.year + 1
+        while year <= last_year and emitted < limit and guard < 4000:
+            guard += 1
+            if years_from_start % interval == 0:
+                for month in months:
+                    for day in _byday_dates_in_month(year, month, byday_specs):
+                        occ = at_time(day)
+                        if occ + duration >= start:
+                            if not accept(occ):
+                                return out
+            year += 1
+            years_from_start += 1
+            if count is None and year > window_end.year + 2:
+                break
         return out
 
     step = {
