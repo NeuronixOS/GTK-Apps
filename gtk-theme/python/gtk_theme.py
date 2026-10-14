@@ -952,7 +952,7 @@ def _apply_hyprbars_button_keywords(
             return
     size = str(chrome.button_size)
     for icon, action in (
-        (chrome.close, "hyprctl dispatch killactive"),
+        (chrome.close, "hyprctl dispatch closewindow activewindow"),
         (chrome.maximize, "hyprctl dispatch fullscreen 1"),
         (chrome.minimize, "hyprctl dispatch movetoworkspacesilent special:minimized"),
     ):
@@ -1080,7 +1080,7 @@ def _rewrite_one_hyprbars_button(
     idx = max(lower.rfind(", rgb("), lower.rfind(",rgba("), lower.rfind(",rgb("))
     action = after_icon[:idx].strip() if idx >= 0 else after_icon
     act = action.lower()
-    if "killactive" in act:
+    if "killactive" in act or "closewindow" in act:
         icon = chrome.close
     elif "fullscreen" in act:
         icon = chrome.maximize

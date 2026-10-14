@@ -15,6 +15,7 @@ Suite of GTK4 desktop apps for Neuronix. Apps share color profiles and UI chrome
 | `gtk-theme-editor` | Rust | Edit suite color profiles (fg/bg + 16-color palette); save custom profiles and apply suite-wide |
 | `gtk-colors` | Python | Color picker and format converter (RGB/Hex and many color spaces, palette harmonies) |
 | `gtk-calendar` | Python | Month calendar: Google sign-in plus `.ics` / webcal feeds |
+| `gtk-emoji` | Python | Emoji picker (search, recent, copy to clipboard) — [Gtk4.0-Emoji-Picker](https://github.com/NeuronixOS/Gtk4.0-Emoji-Picker) |
 | `gtk-configs` | Python | Neuronix config tree editor (`~/configs` or `--root`): Hyprland, Waybar, Fuzzel, Mako, colors, raw files |
 | `gtk-meld` | Python | Visual diff / merge tool (Meld-based, GTK4) |
 | `gtk-photos` | Python | Photo organizer (drive browse, favorites, folders, website thumbnails) |
