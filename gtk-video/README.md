@@ -45,7 +45,7 @@ sudo pacman -S base-devel gtk4 adwaita-icon-theme gst-plugins-good \
 
 ## Build
 
-From this directory (`GTK-Apps/gtk-video`):
+From this directory (`gtk-video/`):
 
 ```bash
 cargo build --release

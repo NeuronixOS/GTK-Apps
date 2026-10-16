@@ -56,7 +56,8 @@ Shared helpers live in `gtk-theme` (`IconMenu`, `labeled_button`, `icon_for_acti
 After a successful rebuild, `syn-to-devices.sh` copies binaries into:
 
 - **This computer:** `/usr/local/lib/neuronix/gtk-apps` (when that prefix exists)
-- **Next ISO:** `../Neuronix/default/gtk-apps` and `../Neuronix/personalize/gtk-apps`
+- **Next ISO (Neuronix stock):** `../../Neuronix/default/gtk-apps`
+- **Next ISO (KvNix extras):** `../../KvNix/personalize/gtk-apps`
 
 ```bash
 ./syn-to-devices.sh               # ISO tree + live prefix

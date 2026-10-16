@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 _PROFILES_PATH = Path(__file__).resolve().parent.parent / "profiles.json"
-_DEFAULT_ID = "gruvbox-dark"
+_DEFAULT_ID = "neuronix"
 
 
 def _profiles_json_path() -> Path:
@@ -714,6 +714,7 @@ def sourceview_scheme_candidates(profile_id: str) -> list[str]:
         "night-owl": ["night-owl", "Adwaita-dark", "classic"],
         "palenight": ["palenight", "Adwaita-dark", "classic"],
         "material-darker": ["material-darker", "Adwaita-dark", "classic"],
+        "neuronix": ["material-darker", "Adwaita-dark", "classic"],
         "cobalt2": ["cobalt", "Adwaita-dark", "classic"],
         "zenburn": ["zenburn", "oblivion", "Adwaita-dark", "classic"],
         "tomorrow-night": ["tomorrow-night", "Adwaita-dark", "classic"],

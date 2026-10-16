@@ -1,5 +1,29 @@
 [
   {
+    "id": "neuronix",
+    "name": "Neuronix",
+    "foreground": "#eeffff",
+    "background": "#212121",
+    "palette": [
+      "#000000",
+      "#ff5370",
+      "#c3e88d",
+      "#ffcb6b",
+      "#d75d1b",
+      "#c792ea",
+      "#89ddff",
+      "#ffffff",
+      "#000000",
+      "#ff5370",
+      "#c3e88d",
+      "#ffcb6b",
+      "#82aaff",
+      "#c792ea",
+      "#89ddff",
+      "#ffffff"
+    ]
+  },
+  {
     "id": "gruvbox-dark",
     "name": "Gruvbox Dark",
     "foreground": "#ebdbb2",

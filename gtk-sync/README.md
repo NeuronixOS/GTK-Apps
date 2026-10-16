@@ -11,7 +11,7 @@ Clients push/pull over **HTTPS (TLS)** with a shared username/password. Servers 
 ## Install
 
 ```bash
-cd ~/Dropbox/Devices/GTK-Apps/gtk-sync
+cd gtk-sync   # from this suite's checkout root
 ./install.sh
 ```
 

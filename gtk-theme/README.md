@@ -12,9 +12,9 @@ Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/N
 |------|------|
 | `src/` | Rust library (`gtk-theme`) |
 | `python/gtk_theme.py` | Python helpers for GTK4 apps |
-| `profiles.json` | Built-in color profiles |
+| `profiles.json` | Built-in color profiles (**Neuronix** first, plus well-known themes) |
 
-Active profile selection lives in `~/.config/gtk-apps/theme.toml`; custom profiles in `~/.config/gtk-apps/custom-profiles.json`.
+Active profile selection lives in `~/.config/gtk-apps/theme.toml`; chrome overrides for Neuronix (and any user-saved customs) live in `~/.config/gtk-apps/custom-profiles.json`.
 
 ## Use from Rust
 

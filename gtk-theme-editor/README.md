@@ -2,11 +2,11 @@
 
 A GTK4 front-end for the shared [`gtk-theme`](../gtk-theme) suite color profiles.
 
-Load any built-in profile (Gruvbox, Tokyo Night, Dracula, Nord, …) or one of
-your own custom profiles, tweak the **foreground**, **background**, **window
-border**, and the full **16-color ANSI palette**, and watch the whole window
-recolor as you edit. Save your result under a custom name and it becomes
-available in every GTK-Apps suite app's *Profile* menu.
+Load the stock **Neuronix** profile (or one of your own custom profiles), tweak
+the **foreground**, **background**, **window border**, and the full **16-color
+ANSI palette**, and watch the whole window recolor as you edit. Save your
+result under a custom name and it becomes available in every GTK-Apps suite
+app's *Profile* menu.
 
 Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/NeuronixOS/GTK-Apps)
 
@@ -35,8 +35,8 @@ Custom profiles live alongside the shared `theme.toml` in
 from the library automatically lists them.
 
 > Note: other suite apps must be rebuilt against the updated `gtk-theme`
-> library (run `./build-launch.sh` from `GTK-Apps/`) before they can resolve
-> and display custom profiles.
+> library (run `./build-launch.sh` from the suite root) before they can
+> resolve and display custom profiles.
 
 ## Build & run
 

@@ -2,19 +2,19 @@
 # Stop, rebuild (compiled apps only), install/sync, and relaunch GTK-Apps.
 #
 # Works from any checkout of this directory. Paths are resolved from this
-# script's location (expected: LinuxOS/GTK-Apps next to Neuronix/ and KvNix/).
+# script's location (monorepo root is detected by walking up for Neuronix/).
 #
 # Usage:
 #   ./build-launch.sh                         # all apps
 #   ./build-launch.sh gtk-files               # one app
 #   ./build-launch.sh gtk-files gtk-photos
-#   ./build-launch.sh --linuxos /path/to/LinuxOS
+#   ./build-launch.sh --linuxos /path/to/monorepo
 #   ./build-launch.sh --local gtk-files       # also install into /usr/local
 #
 # Rust apps (Cargo.toml): cargo build --release, then run the binary.
 # Python / script apps: skip build; run via launch/start/run.sh or python entrypoint.
 # After each rebuild, runs ./syn-to-devices.sh:
-#   - LinuxOS/Neuronix/default/gtk-apps + KvNix/personalize/gtk-apps (next ISO)
+#   - ../../Neuronix/default/gtk-apps + ../../KvNix/personalize/gtk-apps (next ISO)
 #   - this computer: /usr/local/lib/neuronix/gtk-apps when that prefix exists (or --local)
 set -euo pipefail
 
@@ -29,16 +29,16 @@ suite apps are rebuilt. This script may live anywhere — it uses its own
 directory as the source tree.
 
 Options:
-  --linuxos DIR, -L DIR   LinuxOS repo root (parent of Neuronix/ and KvNix/)
-  --save-linuxos          remember DIR in ~/.config/gtk-apps/linuxos-root
-  --no-sync               do not copy into a LinuxOS tree
+  --linuxos DIR, -L DIR   monorepo root (parent of Neuronix/ and KvNix/)
+  --no-sync               do not copy into a monorepo / ISO tree
   --local                 install into /usr/local/lib/neuronix/gtk-apps
   --no-local              skip local install even if the prefix exists
   --no-launch             rebuild/sync only; do not relaunch apps
   -h, --help              show this help
 
-With no extra flags this script syncs into the sibling LinuxOS tree (next ISO)
-and, on a Neuronix/KvNix machine, into /usr/local (this computer).
+With no extra flags this script syncs into ../../Neuronix/default/gtk-apps and
+../../KvNix/personalize/gtk-apps (for the next ISO) when that layout is found,
+and on a Neuronix machine into /usr/local (this computer).
 
 Apps: gtk-calc gtk-edit gtk-files gtk-image gtk-video gtk-term gtk-theme-editor
       gtk-photos gtk-colors gtk-calendar
@@ -63,9 +63,9 @@ if ! command -v cargo >/dev/null 2>&1; then
   done
   unset _cargo_homes _sudo_home _h
 fi
-if ! command -v cargo >/dev/null 2>&1 && [[ -x /home/khinds/.cargo/bin/cargo ]]; then
-  export PATH="/home/khinds/.cargo/bin:${PATH}"
-  export CARGO_HOME="${CARGO_HOME:-/home/khinds/.cargo}"
+if ! command -v cargo >/dev/null 2>&1 && [[ -x "${HOME}/.cargo/bin/cargo" ]]; then
+  export PATH="${HOME}/.cargo/bin:${PATH}"
+  export CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
 fi
 
 # Suite apps (gtk-theme / gtk-neuron are libraries — not launched as windows).
@@ -485,7 +485,6 @@ sync_to_devices() {
 }
 
 LINUXOS_ARG=""
-SAVE_LINUXOS=0
 NO_SYNC=0
 FORCE_LOCAL=0
 NO_LOCAL=0
@@ -509,7 +508,7 @@ while (($#)); do
       shift
       ;;
     --save-linuxos)
-      SAVE_LINUXOS=1
+      echo "build-launch: --save-linuxos is obsolete (LinuxOS root is auto-detected)" >&2
       shift
       ;;
     --no-sync|--no-linuxos)
@@ -548,7 +547,6 @@ done
 if [[ -n "$LINUXOS_ARG" ]]; then
   SYNC_ARGS+=(--linuxos "$LINUXOS_ARG")
 fi
-((SAVE_LINUXOS)) && SYNC_ARGS+=(--save-linuxos)
 ((NO_SYNC)) && SYNC_ARGS+=(--no-linuxos)
 ((FORCE_LOCAL)) && SYNC_ARGS+=(--local)
 ((NO_LOCAL)) && SYNC_ARGS+=(--no-local)

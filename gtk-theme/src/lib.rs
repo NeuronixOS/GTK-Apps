@@ -21,6 +21,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use gtk::gdk;
@@ -551,19 +552,36 @@ impl ProfileData {
 }
 
 /// Built-in profiles shown in every app's theme selector.
+///
+/// Loaded from `profiles.json` (Neuronix first, then well-known themes).
 pub fn builtin_profiles() -> &'static [Profile] {
-    &PROFILES
+    static BUILTINS: OnceLock<&'static [Profile]> = OnceLock::new();
+    BUILTINS.get_or_init(|| {
+        let parsed: Vec<ProfileData> =
+            serde_json::from_str(include_str!("../profiles.json")).unwrap_or_default();
+        let mut profiles: Vec<Profile> = parsed.iter().map(|d| *leak_profile(d)).collect();
+        if profiles.is_empty() {
+            profiles.push(NEURONIX_FALLBACK);
+        } else if let Some(idx) = profiles.iter().position(|p| p.id == "neuronix") {
+            if idx != 0 {
+                profiles.swap(0, idx);
+            }
+        } else {
+            profiles.insert(0, NEURONIX_FALLBACK);
+        }
+        Box::leak(profiles.into_boxed_slice())
+    })
 }
 
 /// Whether an id belongs to a user-saved custom profile (not a built-in).
 pub fn is_custom_profile(id: &str) -> bool {
-    !PROFILES.iter().any(|p| p.id == id) && custom_profile_data(id).is_some()
+    !builtin_profiles().iter().any(|p| p.id == id) && custom_profile_data(id).is_some()
 }
 
 /// Built-in and custom profiles, in menu order (built-ins first, then custom).
 pub fn all_profiles() -> Vec<&'static Profile> {
     refresh_custom_registry();
-    let mut out: Vec<&'static Profile> = PROFILES.iter().collect();
+    let mut out: Vec<&'static Profile> = builtin_profiles().iter().collect();
     CUSTOM_REGISTRY.with(|reg| {
         let reg = reg.borrow();
         let mut customs: Vec<&'static Profile> = reg.values().map(|(_, p)| *p).collect();
@@ -574,7 +592,7 @@ pub fn all_profiles() -> Vec<&'static Profile> {
 }
 
 pub fn profile_by_id(id: &str) -> Option<&'static Profile> {
-    if let Some(p) = PROFILES.iter().find(|p| p.id == id) {
+    if let Some(p) = builtin_profiles().iter().find(|p| p.id == id) {
         return Some(p);
     }
     refresh_custom_registry();
@@ -582,11 +600,11 @@ pub fn profile_by_id(id: &str) -> Option<&'static Profile> {
 }
 
 pub fn default_profile_id() -> &'static str {
-    "gruvbox-dark"
+    "neuronix"
 }
 
 pub fn default_profile() -> &'static Profile {
-    profile_by_id(default_profile_id()).unwrap_or(&PROFILES[0])
+    profile_by_id(default_profile_id()).unwrap_or_else(|| &builtin_profiles()[0])
 }
 
 /// Current shared theme id (`~/.config/gtk-apps/theme.toml`).
@@ -651,7 +669,7 @@ pub fn custom_profile_data(id: &str) -> Option<ProfileData> {
 
 /// Owned data for any known profile id (built-in or custom).
 pub fn profile_data_by_id(id: &str) -> Option<ProfileData> {
-    if let Some(p) = PROFILES.iter().find(|p| p.id == id) {
+    if let Some(p) = builtin_profiles().iter().find(|p| p.id == id) {
         return Some(ProfileData::from_profile(p));
     }
     custom_profile_data(id)
@@ -684,7 +702,8 @@ pub fn custom_id_for_name(name: &str, keep: Option<&str>) -> String {
         if Some(candidate) == keep {
             return false;
         }
-        PROFILES.iter().any(|p| p.id == candidate) || existing.iter().any(|p| p.id == candidate)
+        builtin_profiles().iter().any(|p| p.id == candidate)
+            || existing.iter().any(|p| p.id == candidate)
     };
 
     if !taken(&base) {
@@ -2015,7 +2034,7 @@ pub fn sourceview_scheme_candidates(profile_id: &str) -> &'static [&'static str]
         "ayu-dark" | "ayu-mirage" => &["ayu-dark", "Adwaita-dark", "classic"],
         "night-owl" => &["night-owl", "Adwaita-dark", "classic"],
         "palenight" => &["palenight", "Adwaita-dark", "classic"],
-        "material-darker" => &["material-darker", "Adwaita-dark", "classic"],
+        "material-darker" | "neuronix" => &["material-darker", "Adwaita-dark", "classic"],
         "cobalt2" => &["cobalt", "Adwaita-dark", "classic"],
         "zenburn" => &["zenburn", "oblivion", "Adwaita-dark", "classic"],
         "tomorrow-night" => &["tomorrow-night", "Adwaita-dark", "classic"],
@@ -2149,7 +2168,7 @@ pub fn append_profile_menu(parent: &gio::Menu, action_name: &str) {
     // User-saved custom profiles (from the theme editor) get their own section.
     let customs: Vec<&'static Profile> = all_profiles()
         .into_iter()
-        .filter(|p| !PROFILES.iter().any(|b| b.id == p.id))
+        .filter(|p| !builtin_profiles().iter().any(|b| b.id == p.id))
         .collect();
     if !customs.is_empty() {
         let custom_section = gio::Menu::new();
@@ -4353,315 +4372,14 @@ impl ThemeWatchState {
     }
 }
 
-/// Built-in suite profiles. Default (`gruvbox-dark`) is first.
-///
-/// Palettes are adapted from the published color schemes of each theme
-/// (Gruvbox, Tokyo Night, Catppuccin, Dracula, Nord, Rosé Pine, One Dark,
-/// Monokai, Kanagawa, Everforest, Ayu, Night Owl, Solarized, etc.) — not
-/// invented arbitrarily. Exact hex values can differ slightly from upstream
-/// repos; chrome CSS uses fg/bg for contrast rather than ANSI slot 0.
-static PROFILES: [Profile; 30] = [
-    // --- default ---
-    Profile {
-        id: "gruvbox-dark",
-        name: "Gruvbox Dark",
-        foreground: "#ebdbb2",
-        background: "#282828",
-        palette: [
-            "#282828", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#a89984",
-            "#928374", "#fb4934", "#b8bb26", "#fabd2f", "#83a598", "#d3869b", "#8ec07c", "#ebdbb2",
-        ],
-    },
-    Profile {
-        id: "gruvbox-light",
-        name: "Gruvbox Light",
-        foreground: "#3c3836",
-        background: "#fbf1c7",
-        palette: [
-            "#fbf1c7", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#7c6f64",
-            "#928374", "#9d0006", "#79740e", "#b57614", "#076678", "#8f3f71", "#427b58", "#3c3836",
-        ],
-    },
-    // --- popular dark ---
-    Profile {
-        id: "tokyo-night",
-        name: "Tokyo Night",
-        foreground: "#c0caf5",
-        background: "#1a1b26",
-        palette: [
-            "#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6",
-            "#414868", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#c0caf5",
-        ],
-    },
-    Profile {
-        id: "tokyo-night-storm",
-        name: "Tokyo Night Storm",
-        foreground: "#c0caf5",
-        background: "#24283b",
-        palette: [
-            "#1d202f", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6",
-            "#414868", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#c0caf5",
-        ],
-    },
-    Profile {
-        id: "dracula",
-        name: "Dracula",
-        foreground: "#f8f8f2",
-        background: "#282a36",
-        palette: [
-            "#21222c", "#ff5555", "#50fa7b", "#f1fa8c", "#bd93f9", "#ff79c6", "#8be9fd", "#f8f8f2",
-            "#6272a4", "#ff6e6e", "#69ff94", "#ffffa5", "#d6acff", "#ff92df", "#a4ffff", "#ffffff",
-        ],
-    },
-    Profile {
-        id: "nord",
-        name: "Nord",
-        foreground: "#d8dee9",
-        background: "#2e3440",
-        palette: [
-            "#3b4252", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#88c0d0", "#e5e9f0",
-            "#4c566a", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#8fbcbb", "#eceff4",
-        ],
-    },
-    Profile {
-        id: "catppuccin-mocha",
-        name: "Catppuccin Mocha",
-        foreground: "#cdd6f4",
-        background: "#1e1e2e",
-        palette: [
-            "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#bac2de",
-            "#585b70", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#cdd6f4",
-        ],
-    },
-    Profile {
-        id: "catppuccin-frappe",
-        name: "Catppuccin Frappé",
-        foreground: "#c6d0f5",
-        background: "#303446",
-        palette: [
-            "#51576d", "#e78284", "#a6d189", "#e5c890", "#8caaee", "#f4b8e4", "#81c8be", "#b5bfe2",
-            "#626880", "#e78284", "#a6d189", "#e5c890", "#8caaee", "#f4b8e4", "#81c8be", "#c6d0f5",
-        ],
-    },
-    Profile {
-        id: "rose-pine",
-        name: "Rosé Pine",
-        foreground: "#e0def4",
-        background: "#191724",
-        palette: [
-            "#26233a", "#eb6f92", "#31748f", "#f6c177", "#9ccfd8", "#c4a7e7", "#ebbcba", "#e0def4",
-            "#6e6a86", "#eb6f92", "#31748f", "#f6c177", "#9ccfd8", "#c4a7e7", "#ebbcba", "#e0def4",
-        ],
-    },
-    Profile {
-        id: "rose-pine-moon",
-        name: "Rosé Pine Moon",
-        foreground: "#e0def4",
-        background: "#232136",
-        palette: [
-            "#2a273f", "#eb6f92", "#3e8fb0", "#f6c177", "#9ccfd8", "#c4a7e7", "#ea9a97", "#e0def4",
-            "#6e6a86", "#eb6f92", "#3e8fb0", "#f6c177", "#9ccfd8", "#c4a7e7", "#ea9a97", "#e0def4",
-        ],
-    },
-    Profile {
-        id: "one-dark",
-        name: "One Dark",
-        foreground: "#abb2bf",
-        background: "#282c34",
-        palette: [
-            "#282c34", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#abb2bf",
-            "#5c6370", "#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#ffffff",
-        ],
-    },
-    Profile {
-        id: "monokai",
-        name: "Monokai",
-        foreground: "#f8f8f2",
-        background: "#272822",
-        palette: [
-            "#272822", "#f92672", "#a6e22e", "#f4bf75", "#66d9ef", "#ae81ff", "#a1efe4", "#f8f8f2",
-            "#75715e", "#f92672", "#a6e22e", "#f4bf75", "#66d9ef", "#ae81ff", "#a1efe4", "#f9f8f5",
-        ],
-    },
-    Profile {
-        id: "kanagawa",
-        name: "Kanagawa",
-        foreground: "#dcd7ba",
-        background: "#1f1f28",
-        palette: [
-            "#090618", "#c34043", "#76946a", "#c0a36e", "#7e9cd8", "#957fb8", "#6a9589", "#c8c093",
-            "#727169", "#e82424", "#98bb6c", "#e6c384", "#7fb4ca", "#938aa9", "#7aa89f", "#dcd7ba",
-        ],
-    },
-    Profile {
-        id: "everforest-dark",
-        name: "Everforest Dark",
-        foreground: "#d3c6aa",
-        background: "#2d353b",
-        palette: [
-            "#475258", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092", "#d3c6aa",
-            "#7a8478", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092", "#d3c6aa",
-        ],
-    },
-    Profile {
-        id: "ayu-dark",
-        name: "Ayu Dark",
-        foreground: "#b3b1ad",
-        background: "#0a0e14",
-        palette: [
-            "#01060e", "#ea6c73", "#91b362", "#f9af4f", "#53bdfa", "#fae994", "#90e1c6", "#c7c7c7",
-            "#686868", "#f07178", "#c2d94c", "#ffb454", "#59c2ff", "#ffee99", "#95e6cb", "#ffffff",
-        ],
-    },
-    Profile {
-        id: "ayu-mirage",
-        name: "Ayu Mirage",
-        foreground: "#cccac2",
-        background: "#1f2430",
-        palette: [
-            "#191e2a", "#ed8274", "#87d96c", "#fad07b", "#6dcbfa", "#fbb0ce", "#90e1c6", "#c7c7c7",
-            "#686868", "#f28779", "#d5ff80", "#ffcc66", "#73d0ff", "#f287bc", "#95e6cb", "#ffffff",
-        ],
-    },
-    Profile {
-        id: "night-owl",
-        name: "Night Owl",
-        foreground: "#d6deeb",
-        background: "#011627",
-        palette: [
-            "#011627", "#ef5350", "#22da6e", "#addb67", "#82aaff", "#c792ea", "#21c7a8", "#ffffff",
-            "#575656", "#ef5350", "#22da6e", "#ffeb95", "#82aaff", "#c792ea", "#7fdbca", "#ffffff",
-        ],
-    },
-    Profile {
-        id: "palenight",
-        name: "Palenight",
-        foreground: "#a6accd",
-        background: "#292d3e",
-        palette: [
-            "#292d3e", "#f07178", "#c3e88d", "#ffcb6b", "#82aaff", "#c792ea", "#89ddff", "#d0d0d0",
-            "#434758", "#ff8b92", "#ddffa7", "#ffe585", "#9cc4ff", "#e1acff", "#a3f7ff", "#ffffff",
-        ],
-    },
-    Profile {
-        id: "material-darker",
-        name: "Material Darker",
-        foreground: "#eeffff",
-        background: "#212121",
-        palette: [
-            "#000000", "#ff5370", "#c3e88d", "#ffcb6b", "#82aaff", "#c792ea", "#89ddff", "#ffffff",
-            "#545454", "#ff5370", "#c3e88d", "#ffcb6b", "#82aaff", "#c792ea", "#89ddff", "#ffffff",
-        ],
-    },
-    Profile {
-        id: "cobalt2",
-        name: "Cobalt2",
-        foreground: "#ffffff",
-        background: "#193549",
-        palette: [
-            "#000000", "#ff0000", "#38de21", "#ffe50a", "#1460d2", "#ff005d", "#00bbbb", "#bbbbbb",
-            "#555555", "#f40e17", "#3bd01d", "#edc809", "#5555ff", "#ff55ff", "#6ae3fa", "#ffffff",
-        ],
-    },
-    Profile {
-        id: "zenburn",
-        name: "Zenburn",
-        foreground: "#dcdccc",
-        background: "#3f3f3f",
-        palette: [
-            "#4f4f4f", "#705050", "#60b48a", "#f0dfaf", "#506070", "#dc8cc3", "#8cd0d3", "#dcdccc",
-            "#709080", "#dca3a3", "#c3bf9f", "#e0cf9f", "#94bff3", "#ec93d3", "#93e0e3", "#ffffff",
-        ],
-    },
-    Profile {
-        id: "tomorrow-night",
-        name: "Tomorrow Night",
-        foreground: "#c5c8c6",
-        background: "#1d1f21",
-        palette: [
-            "#1d1f21", "#cc6666", "#b5bd68", "#f0c674", "#81a2be", "#b294bb", "#8abeb7", "#c5c8c6",
-            "#969896", "#cc6666", "#b5bd68", "#f0c674", "#81a2be", "#b294bb", "#8abeb7", "#ffffff",
-        ],
-    },
-    Profile {
-        id: "oceanic-next",
-        name: "Oceanic Next",
-        foreground: "#d8dee9",
-        background: "#1b2b34",
-        palette: [
-            "#29414f", "#ec5f67", "#99c794", "#fac863", "#6699cc", "#c594c5", "#5fb3b3", "#d8dee9",
-            "#405860", "#ec5f67", "#99c794", "#fac863", "#6699cc", "#c594c5", "#5fb3b3", "#ffffff",
-        ],
-    },
-    Profile {
-        id: "github-dark",
-        name: "GitHub Dark",
-        foreground: "#e6edf3",
-        background: "#0d1117",
-        palette: [
-            "#484f58", "#ff7b72", "#3fb950", "#d29922", "#58a6ff", "#bc8cff", "#39c5cf", "#b1bac4",
-            "#6e7681", "#ffa198", "#56d364", "#e3b341", "#79c0ff", "#d2a8ff", "#56d4dd", "#ffffff",
-        ],
-    },
-    Profile {
-        id: "synthwave-84",
-        name: "Synthwave '84",
-        foreground: "#f92aad",
-        background: "#2b213a",
-        palette: [
-            "#241b2f", "#f97e72", "#72f1b8", "#fede5d", "#36f9f6", "#ff7edb", "#f97e72", "#ffffff",
-            "#848bbd", "#f88414", "#72f1b8", "#fff951", "#36f9f6", "#ff7edb", "#f97e72", "#ffffff",
-        ],
-    },
-    // --- light ---
-    Profile {
-        id: "solarized-dark",
-        name: "Solarized Dark",
-        foreground: "#839496",
-        background: "#002b36",
-        palette: [
-            "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#eee8d5",
-            "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3",
-        ],
-    },
-    Profile {
-        id: "solarized-light",
-        name: "Solarized Light",
-        foreground: "#657b83",
-        background: "#fdf6e3",
-        palette: [
-            "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#eee8d5",
-            "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3",
-        ],
-    },
-    Profile {
-        id: "catppuccin-latte",
-        name: "Catppuccin Latte",
-        foreground: "#4c4f69",
-        background: "#eff1f5",
-        palette: [
-            "#5c5f77", "#d20f39", "#40a02b", "#df8e1d", "#1e66f5", "#ea76cb", "#179299", "#acb0be",
-            "#6c6f85", "#d20f39", "#40a02b", "#df8e1d", "#1e66f5", "#ea76cb", "#179299", "#4c4f69",
-        ],
-    },
-    Profile {
-        id: "rose-pine-dawn",
-        name: "Rosé Pine Dawn",
-        foreground: "#575279",
-        background: "#faf4ed",
-        palette: [
-            "#f2e9e1", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e", "#575279",
-            "#9893a5", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e", "#575279",
-        ],
-    },
-    Profile {
-        id: "github-light",
-        name: "GitHub Light",
-        foreground: "#1f2328",
-        background: "#ffffff",
-        palette: [
-            "#24292f", "#cf222e", "#116329", "#4d2d00", "#0969da", "#8250df", "#1b7c83", "#6e7781",
-            "#57606a", "#a40e26", "#1a7f37", "#633c01", "#218bff", "#a475f9", "#3192aa", "#1f2328",
-        ],
-    },
-];
+/// Fallback when `profiles.json` is missing or empty at compile time.
+const NEURONIX_FALLBACK: Profile = Profile {
+    id: "neuronix",
+    name: "Neuronix",
+    foreground: "#eeffff",
+    background: "#212121",
+    palette: [
+        "#000000", "#ff5370", "#c3e88d", "#ffcb6b", "#d75d1b", "#c792ea", "#89ddff", "#ffffff",
+        "#000000", "#ff5370", "#c3e88d", "#ffcb6b", "#82aaff", "#c792ea", "#89ddff", "#ffffff",
+    ],
+};
