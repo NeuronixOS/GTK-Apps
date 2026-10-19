@@ -8,7 +8,6 @@ mod file_ops;
 mod find_in_files;
 mod git_status;
 mod network;
-mod neuron;
 mod open_with;
 mod pathbar;
 mod places;

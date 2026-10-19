@@ -224,7 +224,7 @@ impl VideoWindow {
             flip_v: Cell::new(false),
         });
 
-        crate::neuron::attach(&header, &window, &main_box, &vw);
+        window.set_child(Some(&main_box));
 
         install_actions(&vw);
         setup_drop_target(&vw);
@@ -336,26 +336,6 @@ impl VideoWindow {
 
     pub fn current_path(&self) -> Option<PathBuf> {
         self.path.borrow().clone()
-    }
-
-    pub fn current_state(&self) -> serde_json::Value {
-        let crop = self.crop.crop();
-        serde_json::json!({
-            "path": self.current_path().map(|p| p.to_string_lossy().into_owned()),
-            "duration_us": self.timeline.duration_us(),
-            "in_us": self.timeline.start_us(),
-            "out_us": self.timeline.end_us(),
-            "playhead_us": self.timeline.playhead_us(),
-            "playing": self.media().map(|m| m.is_playing()).unwrap_or(false),
-            "width": self.src_w.get(),
-            "height": self.src_h.get(),
-            "rotate_deg": (self.rotate_q.get() as i32 % 4) * 90,
-            "flip_h": self.flip_h.get(),
-            "flip_v": self.flip_v.get(),
-            "crop": crop.map(|c| serde_json::json!({
-                "x": c.x, "y": c.y, "w": c.w, "h": c.h
-            })),
-        })
     }
 
     fn set_status(&self, text: &str) {
@@ -496,64 +476,6 @@ impl VideoWindow {
         self.apply_preview_css();
     }
 
-    pub fn set_playing(&self, playing: bool) {
-        let Some(media) = self.media() else {
-            return;
-        };
-        if playing {
-            if !media.is_playing() {
-                let _ = media.play();
-                self.sync_play_icon();
-            }
-        } else if media.is_playing() {
-            media.pause();
-            self.sync_play_icon();
-        }
-    }
-
-    pub fn seek_us(&self, us: i64) {
-        self.seek_to(us);
-    }
-
-    pub fn set_in_us(&self, us: Option<i64>) {
-        if self.timeline.duration_us() <= 0 {
-            return;
-        }
-        let pos = us.unwrap_or_else(|| {
-            self.media()
-                .map(|m| m.timestamp())
-                .unwrap_or_else(|| self.timeline.playhead_us())
-        });
-        let end = self.timeline.end_us();
-        let clamped = pos.clamp(0, (end - export::MIN_SELECTION_US).max(0));
-        self.timeline.set_range(clamped, end);
-        self.refresh_status();
-    }
-
-    pub fn set_out_us(&self, us: Option<i64>) {
-        if self.timeline.duration_us() <= 0 {
-            return;
-        }
-        let pos = us.unwrap_or_else(|| {
-            self.media()
-                .map(|m| m.timestamp())
-                .unwrap_or_else(|| self.timeline.playhead_us())
-        });
-        let start = self.timeline.start_us();
-        let dur = self.timeline.duration_us();
-        let clamped = pos.clamp((start + export::MIN_SELECTION_US).min(dur), dur);
-        self.timeline.set_range(start, clamped);
-        self.refresh_status();
-    }
-
-    pub fn set_range_us(&self, start: i64, end: i64) {
-        if self.timeline.duration_us() <= 0 {
-            return;
-        }
-        self.timeline.set_range(start, end);
-        self.refresh_status();
-    }
-
     pub fn apply_crop_preset(&self, preset: &str) -> Result<(), String> {
         let vw = self.src_w.get();
         let vh = self.src_h.get();
@@ -566,17 +488,6 @@ impl VideoWindow {
         } else {
             self.crop.set_crop(Some(rect));
         }
-        self.set_crop_mode(true);
-        Ok(())
-    }
-
-    pub fn set_crop_rect(&self, x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
-        let vw = self.src_w.get();
-        let vh = self.src_h.get();
-        if vw <= 0 || vh <= 0 {
-            return Err("no video loaded".into());
-        }
-        self.crop.set_crop(Some(CropRect { x, y, w, h }.clamp(vw, vh)));
         self.set_crop_mode(true);
         Ok(())
     }
@@ -601,25 +512,6 @@ impl VideoWindow {
             src_width: self.src_w.get(),
             src_height: self.src_h.get(),
         }
-    }
-
-    pub fn export_to(&self, output: PathBuf) -> Result<(), String> {
-        let input = self.current_path().ok_or("no video loaded")?;
-        if self.timeline.duration_us() <= 0 {
-            return Err("wait for the video to finish loading".into());
-        }
-        if !export::ffmpeg_available() {
-            return Err("ffmpeg is not installed".into());
-        }
-        if self.timeline.end_us() - self.timeline.start_us() < export::MIN_SELECTION_US {
-            return Err("selection is too short to export".into());
-        }
-        if let Some(media) = self.media() {
-            media.pause();
-            self.sync_play_icon();
-        }
-        run_export_async(self, self.make_export_job(input, output));
-        Ok(())
     }
 
     fn sync_play_icon(&self) {
@@ -884,7 +776,6 @@ fn build_menu_button() -> gtk::MenuButton {
     menu.append_section(None, &crop);
 
     let view = gio::Menu::new();
-    gtk_neuron::append_driving_menu_item(&mut icons, &view);
     gtk_theme::append_profile_menu(&view, "win.theme");
     menu.append_section(None, &view);
 

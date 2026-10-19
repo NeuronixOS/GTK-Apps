@@ -10,6 +10,18 @@ use walkdir::WalkDir;
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct HashCache {
     files: HashMap<String, CacheEnt>,
+    /// Cached paths missing from the most recent walk. Not persisted.
+    #[serde(skip)]
+    last_absent: Vec<AbsentEnt>,
+}
+
+/// A path we had hashed before that is no longer on disk.
+#[derive(Clone)]
+pub struct AbsentEnt {
+    pub path: String,
+    pub mtime: u64,
+    pub size: u64,
+    pub hash: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -45,6 +57,23 @@ impl HashCache {
                 let _ = std::fs::rename(tmp, p);
             }
         }
+    }
+
+    /// Paths dropped by the latest [`local_file_map`] because they left the tree.
+    pub fn take_absent(&mut self) -> Vec<AbsentEnt> {
+        std::mem::take(&mut self.last_absent)
+    }
+
+    /// Put a path back so a failed tombstone is retried on the next scan.
+    pub fn remember_absent(&mut self, ent: &AbsentEnt) {
+        self.files.insert(
+            ent.path.clone(),
+            CacheEnt {
+                mtime: ent.mtime,
+                size: ent.size,
+                hash: ent.hash.clone(),
+            },
+        );
     }
 }
 
@@ -109,6 +138,17 @@ pub fn local_file_map(
         seen.insert(rel.clone());
         map.insert(rel, (mtime, hash));
     }
+    cache.last_absent = cache
+        .files
+        .iter()
+        .filter(|(k, _)| !seen.contains(*k))
+        .map(|(k, ent)| AbsentEnt {
+            path: k.clone(),
+            mtime: ent.mtime,
+            size: ent.size,
+            hash: ent.hash.clone(),
+        })
+        .collect();
     cache.files.retain(|k, _| seen.contains(k));
     Ok(map)
 }

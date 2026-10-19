@@ -1,0 +1,9 @@
+# Copy to ~/.config/gtk-apps/gtk-player/config.toml
+# Missing keys keep the defaults below.
+
+window_width = 1100
+window_height = 700
+loop_track = false
+loop_playlist = false
+playlist_open = true
+volume = 1.0

@@ -10,7 +10,6 @@
 mod config;
 mod crop;
 mod export;
-mod neuron;
 mod timeline;
 mod window;
 
@@ -213,7 +212,6 @@ Keyboard shortcuts\n\n\
   Ctrl+R                Rotate clockwise\n\
   Ctrl+Shift+R          Rotate counterclockwise\n\
   Ctrl+Shift+C          Toggle crop overlay\n\n\
-  Ctrl+D                Self Driving\n\
   Ctrl+?                This shortcuts window\n\n\
 Config\n\
   ~/.config/gtk-apps/gtk-video/config.toml\n\

@@ -152,13 +152,9 @@ impl FilesWindow {
             .build();
         app_icons.bind_menu_button(&menu_btn);
 
-        // pack_end order: first = rightmost. Drive sits immediately left of the
-        // hamburger so the sync chip (further left) can show/hide without
-        // shoving the AI button around.
+        // pack_end order: first = rightmost.
         let fw_slot: Rc<RefCell<Option<Rc<FilesWindow>>>> = Rc::new(RefCell::new(None));
-        let driving = crate::neuron::make_driving_mode(&fw_slot);
         header.pack_end(&menu_btn);
-        header.pack_end(&driving.button);
         header.pack_end(&view_btn);
         header.pack_end(&new_folder_btn);
         header.pack_end(&search_btn);
@@ -220,10 +216,7 @@ impl FilesWindow {
         paned.set_shrink_start_child(false);
         paned.set_position(cfg.window.sidebar_width);
 
-        let shell = gtk_neuron::wrap_with_driving_panel(&paned, &driving.panel);
-        driving.bind_paned(&shell);
-        driving.install_window_action(&window);
-        window.set_child(Some(&shell));
+        window.set_child(Some(&paned));
 
         // Callbacks filled once `fw` exists (see `fw_slot` above — created with header).
         let on_reveal = {
@@ -2245,7 +2238,6 @@ fn build_app_menu() -> (gio::Menu, gtk_theme::IconMenu) {
     sort.append(Some("By Type"), Some("win.sort-type"));
     sort.append(Some("By Modified"), Some("win.sort-modified"));
     icons.append_submenu(&view, "Sort", &sort, "view-sort-ascending-symbolic");
-    gtk_neuron::append_driving_menu_item(&mut icons, &view);
     gtk_theme::append_profile_menu(&view, "win.theme");
     menu.append_submenu(Some("_View"), &view);
 

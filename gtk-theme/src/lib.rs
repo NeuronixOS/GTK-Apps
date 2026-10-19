@@ -8,14 +8,12 @@
 //! menu rows. Runtime icons come from the system `adwaita-icon-theme` package.
 
 mod icons;
-mod neuron_daemon;
 
 pub use icons::{
     app_icons, ensure_adwaita_icons, icon_button, icon_for_action, icon_for_label, icon_label_box,
     labeled_button, strip_mnemonic, symbolic_image, IconMenu, MenuIconEntry,
     RUNTIME_ICON_THEME_PACKAGE, SYMBOLIC_PIXEL_SIZE,
 };
-pub use neuron_daemon::ensure_neuron_daemon;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -285,7 +283,7 @@ impl ChromeButtons {
 
     fn glyph_for_action(&self, action: &str) -> &str {
         let lower = action.to_ascii_lowercase();
-        if lower.contains("killactive") {
+        if lower.contains("killactive") || lower.contains("closewindow") {
             &self.close
         } else if lower.contains("fullscreen") {
             &self.maximize
@@ -1931,7 +1929,6 @@ pub fn present_file_chooser_at(
 
 /// Load / update the shared chrome CSS provider for the default display.
 pub fn apply_chrome(profile: &Profile) {
-    ensure_neuron_daemon();
     apply_chrome_css(profile.is_dark(), &chrome_css(profile));
 }
 
@@ -2234,6 +2231,152 @@ pub fn profile_id_at(ids: &[&'static str], selected: u32) -> Option<&'static str
 pub fn sync_hyprbars(profile: &Profile) {
     let chrome = profile.window_chrome();
     let _ = sync_hyprbars_chrome(&profile.surface_hex(), profile.foreground, &chrome);
+    let _ = sync_hyprtabs(profile);
+}
+
+/// Push GTK suite colors into `plugin:hyprtabs` (capsule, text, active pill).
+pub fn sync_hyprtabs(profile: &Profile) -> bool {
+    let chrome = profile.window_chrome();
+    sync_hyprtabs_chrome(
+        &profile.surface_hex(),
+        profile.background,
+        profile.foreground,
+        &chrome,
+    )
+}
+
+fn sync_hyprtabs_chrome(
+    surface_hex: &str,
+    background_hex: &str,
+    text_hex: &str,
+    chrome: &WindowChrome,
+) -> bool {
+    // Capsule ≈ Waybar panel bg at ~75% alpha (50% vanished into dark wallpapers).
+    let Some(bar_rgba) = hex_to_hypr_rgba(background_hex, "c0") else {
+        return false;
+    };
+    let Some(text_rgb) = hex_to_hypr_rgb(text_hex) else {
+        return false;
+    };
+    // Active pill ≈ Waybar selected: foreground fill, background label.
+    let (active_hex, active_text_hex) = if relative_luminance(text_hex) >= 0.45 {
+        let at = if relative_luminance(background_hex) < 0.45 {
+            background_hex.to_string()
+        } else {
+            "#111111".to_string()
+        };
+        (text_hex.to_string(), at)
+    } else {
+        let mut pill = mix_hex(surface_hex, "#ffffff", 0.55);
+        if relative_luminance(&pill) < 0.35 {
+            pill = mix_hex(surface_hex, "#ffffff", 0.72);
+        }
+        (pill, text_hex.to_string())
+    };
+    let Some(active_rgba) = hex_to_hypr_rgba(&active_hex, "ff") else {
+        return false;
+    };
+    let Some(active_text_rgb) = hex_to_hypr_rgb(&active_text_hex) else {
+        return false;
+    };
+    let font = chrome_bar_font(chrome);
+
+    if let Some(path) = hyprland_conf_path() {
+        if let Ok(original) = std::fs::read_to_string(&path) {
+            let out = rewrite_hyprtabs_assigns(
+                &original,
+                &[
+                    ("bar_color", bar_rgba.as_str()),
+                    ("col.text", text_rgb.as_str()),
+                    ("tab_active_color", active_rgba.as_str()),
+                    ("tab_active_text_color", active_text_rgb.as_str()),
+                    ("bar_text_font", font),
+                ],
+            );
+            if out != original {
+                let _ = std::fs::write(&path, out);
+            }
+        }
+    }
+
+    if !theme_session_safe() {
+        hyprctl_keyword("plugin:hyprtabs:bar_color", &bar_rgba);
+        hyprctl_keyword("plugin:hyprtabs:col.text", &text_rgb);
+        hyprctl_keyword("plugin:hyprtabs:tab_active_color", &active_rgba);
+        hyprctl_keyword("plugin:hyprtabs:tab_active_text_color", &active_text_rgb);
+        hyprctl_keyword("plugin:hyprtabs:bar_text_font", font);
+    }
+    true
+}
+
+fn rewrite_hyprtabs_assigns(text: &str, assigns: &[(&str, &str)]) -> String {
+    let mut out = String::new();
+    let mut in_tabs = false;
+    let mut depth: i32 = 0;
+    let mut seen: Vec<&str> = Vec::new();
+    let mut insert_indent = "        ".to_string();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let indent_len = line.len() - trimmed.len();
+        let indent = &line[..indent_len];
+        if !in_tabs && trimmed.starts_with("hyprtabs") {
+            in_tabs = true;
+            depth = 0;
+            seen.clear();
+            out.push_str(line);
+            out.push('\n');
+            depth += trimmed.matches('{').count() as i32 - trimmed.matches('}').count() as i32;
+            continue;
+        }
+        if in_tabs {
+            depth += trimmed.matches('{').count() as i32 - trimmed.matches('}').count() as i32;
+            if depth <= 0 {
+                for (key, value) in assigns {
+                    if !seen.iter().any(|s| s == key) {
+                        out.push_str(&insert_indent);
+                        out.push_str(key);
+                        out.push_str(" = ");
+                        out.push_str(value);
+                        out.push('\n');
+                    }
+                }
+                in_tabs = false;
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+            let mut replaced = false;
+            for (key, value) in assigns {
+                if trimmed.starts_with(&format!("{key} =")) || trimmed.starts_with(&format!("{key}="))
+                {
+                    out.push_str(indent);
+                    out.push_str(key);
+                    out.push_str(" = ");
+                    out.push_str(value);
+                    out.push('\n');
+                    if !seen.iter().any(|s| s == key) {
+                        seen.push(*key);
+                    }
+                    if !indent.is_empty() {
+                        insert_indent = indent.to_string();
+                    }
+                    replaced = true;
+                    break;
+                }
+            }
+            if !replaced {
+                out.push_str(line);
+                out.push('\n');
+            }
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !text.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
 }
 
 /// Same as [`sync_hyprbars`] for arbitrary hex colors (`#rrggbb`).
@@ -2378,10 +2521,8 @@ fn apply_hyprbars_button_keywords(bar_rgb: &str, text_rgb: &str, chrome: &Window
             chrome.buttons.maximize.as_str(),
             "hyprctl dispatch fullscreen 1",
         ),
-        (
-            chrome.buttons.minimize.as_str(),
-            "hyprctl dispatch movetoworkspacesilent special:minimized",
-        ),
+        // Decorative only — minimize / special:minimized was removed.
+        (chrome.buttons.minimize.as_str(), "true"),
     ] {
         hyprctl_keyword(
             "plugin:hyprbars:hyprbars-button",
@@ -2729,7 +2870,7 @@ fn restart_system_dialogs() {
 /// Full desktop reset used by [`select_theme`]: in-process chrome is applied
 /// separately; this pushes Hyprland + shell + system GTK dialog colors.
 pub fn sync_desktop_theme(profile: &Profile) {
-    sync_hyprbars(profile);
+    sync_hyprbars(profile); // also syncs hyprtabs
     sync_shell_chrome(profile);
 }
 

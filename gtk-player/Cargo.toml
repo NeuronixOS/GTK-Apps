@@ -1,0 +1,21 @@
+[package]
+name = "gtk-player"
+version = "0.1.0"
+edition = "2021"
+description = "GTK4 audio and video player with a playlist and A-B loop handles"
+
+[dependencies]
+gtk4 = { version = "0.9", features = ["v4_10"] }
+glib = "0.20"
+gio = "0.20"
+gdk = { version = "0.9", package = "gdk4" }
+cairo-rs = "0.20"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "5"
+gtk-theme = { path = "../gtk-theme" }
+
+[profile.release]
+lto = true
+strip = true
+opt-level = "z"

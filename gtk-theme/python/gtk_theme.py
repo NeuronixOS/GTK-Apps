@@ -15,7 +15,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -819,9 +818,10 @@ def select_theme(
 
 
 def sync_desktop_theme(profile: Optional[Profile] = None) -> bool:
-    """Force-reset hyprbars + Waybar / mako / fuzzel / system GTK dialog colors."""
+    """Force-reset hyprbars + hyprtabs + Waybar / mako / fuzzel / system GTK dialog colors."""
     profile = profile or load_profile()
     sync_hyprbars(profile)
+    sync_hyprtabs(profile)
     sync_shell_chrome(profile)
     return True
 
@@ -833,9 +833,130 @@ def sync_hyprbars(profile: Optional[Profile] = None) -> bool:
     headerbars). Title and glyphs use the profile foreground.
     """
     profile = profile or load_profile()
-    return sync_hyprbars_colors(
+    ok = sync_hyprbars_colors(
         profile.surface_hex(), profile.foreground, chrome=profile.chrome
     )
+    # Keep bottom tabs in the same palette whenever hyprbars is synced.
+    sync_hyprtabs(profile)
+    return ok
+
+
+def sync_hyprtabs(profile: Optional[Profile] = None) -> bool:
+    """Push GTK suite colors into plugin:hyprtabs (capsule, text, active pill)."""
+    profile = profile or load_profile()
+    return sync_hyprtabs_colors(
+        profile.surface_hex(),
+        profile.background,
+        profile.foreground,
+        chrome=profile.chrome,
+    )
+
+
+def sync_hyprtabs_colors(
+    surface_hex: str,
+    background_hex: str,
+    text_hex: str,
+    chrome: Optional[WindowChrome] = None,
+) -> bool:
+    ch = chrome or WindowChrome()
+    # Capsule ≈ Waybar: panel bg at ~75% alpha (50% vanished into dark wallpapers).
+    bar_rgba = _hex_to_hypr_rgba(background_hex, "c0")
+    text_rgb = _hex_to_hypr_rgb(text_hex)
+    # Active pill ≈ Waybar selected module: foreground fill, background label.
+    active_hex = text_hex
+    active_rgba = _hex_to_hypr_rgba(active_hex, "ff")
+    active_text_hex = (
+        background_hex if _relative_luminance(background_hex) < 0.45 else "#111111"
+    )
+    # If fg is dark (light theme), invert: surface pill + fg text.
+    if _relative_luminance(active_hex) < 0.45:
+        active_hex = _mix_hex(surface_hex, "#ffffff", 0.55)
+        if _relative_luminance(active_hex) < 0.35:
+            active_hex = _mix_hex(surface_hex, "#ffffff", 0.72)
+        active_rgba = _hex_to_hypr_rgba(active_hex, "ff")
+        active_text_hex = text_hex
+    active_text_rgb = _hex_to_hypr_rgb(active_text_hex)
+    if not bar_rgba or not text_rgb or not active_rgba or not active_text_rgb:
+        return False
+    font = _chrome_bar_font(ch)
+
+    path = _hyprland_conf_path()
+    if path is not None and path.is_file():
+        try:
+            original = path.read_text(encoding="utf-8")
+        except OSError:
+            original = None
+        if original is not None:
+            out = _rewrite_hyprtabs_assigns(
+                original,
+                {
+                    "bar_color": bar_rgba,
+                    "col.text": text_rgb,
+                    "tab_active_color": active_rgba,
+                    "tab_active_text_color": active_text_rgb,
+                    "bar_text_font": font,
+                },
+            )
+            if out != original:
+                try:
+                    path.write_text(out, encoding="utf-8")
+                except OSError:
+                    pass
+
+    if not _theme_session_safe():
+        _hyprctl_keyword("plugin:hyprtabs:bar_color", bar_rgba)
+        _hyprctl_keyword("plugin:hyprtabs:col.text", text_rgb)
+        _hyprctl_keyword("plugin:hyprtabs:tab_active_color", active_rgba)
+        _hyprctl_keyword("plugin:hyprtabs:tab_active_text_color", active_text_rgb)
+        _hyprctl_keyword("plugin:hyprtabs:bar_text_font", font)
+    return True
+
+
+def _rewrite_hyprtabs_assigns(text: str, assigns: dict[str, str]) -> str:
+    """Set keys only inside the `hyprtabs { ... }` plugin block."""
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    in_tabs = False
+    depth = 0
+    seen: set[str] = set()
+    insert_indent = "        "
+    for line in lines:
+        bare = line.rstrip("\r\n")
+        trimmed = bare.lstrip()
+        indent = bare[: len(bare) - len(trimmed)]
+        if not in_tabs and trimmed.startswith("hyprtabs"):
+            in_tabs = True
+            depth = 0
+            seen = set()
+            out.append(line)
+            if "{" in trimmed:
+                depth += trimmed.count("{") - trimmed.count("}")
+            continue
+        if in_tabs:
+            depth += trimmed.count("{") - trimmed.count("}")
+            if depth <= 0:
+                # Closing brace of hyprtabs — insert any missing keys first.
+                nl = line[len(bare) :] or "\n"
+                for key, value in assigns.items():
+                    if key not in seen:
+                        out.append(f"{insert_indent}{key} = {value}{nl}")
+                in_tabs = False
+                out.append(line)
+                continue
+            replaced = False
+            for key, value in assigns.items():
+                if trimmed.startswith(f"{key} =") or trimmed.startswith(f"{key}="):
+                    nl = line[len(bare) :] or "\n"
+                    out.append(f"{indent}{key} = {value}{nl}")
+                    seen.add(key)
+                    insert_indent = indent or insert_indent
+                    replaced = True
+                    break
+            if not replaced:
+                out.append(line)
+            continue
+        out.append(line)
+    return "".join(out)
 
 
 def sync_hyprbars_colors(
@@ -955,7 +1076,8 @@ def _apply_hyprbars_button_keywords(
     for icon, action in (
         (chrome.close, "hyprctl dispatch closewindow activewindow"),
         (chrome.maximize, "hyprctl dispatch fullscreen 1"),
-        (chrome.minimize, "hyprctl dispatch movetoworkspacesilent special:minimized"),
+        # Decorative only — minimize / special:minimized was removed.
+        (chrome.minimize, "true"),
     ):
         _hyprctl_keyword(
             "plugin:hyprbars:hyprbars-button",
@@ -2645,99 +2767,12 @@ def _sync_hypr_window_geometry(border_size: int, rounding: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-# ---------------------------------------------------------------------------
-# gtk-neurond autostart (suite-wide)
-# ---------------------------------------------------------------------------
-
-
-def _neuron_socket_path() -> Path:
-    runtime = os.environ.get("XDG_RUNTIME_DIR", "").strip()
-    if runtime:
-        return Path(runtime) / "gtk-neuron.sock"
-    cache = Path.home() / ".cache" / "gtk-apps"
-    return cache / "gtk-neuron.sock"
-
-
-def _neuron_socket_connectable() -> bool:
-    sock = _neuron_socket_path()
-    if not sock.exists():
-        return False
-    try:
-        import socket
-
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            s.settimeout(0.2)
-            s.connect(str(sock))
-            return True
-        finally:
-            s.close()
-    except OSError:
-        return False
-
-
-def _find_neurond_binary() -> Optional[Path]:
-    env = os.environ.get("GTK_NEUROND", "").strip()
-    if env and Path(env).is_file():
-        return Path(env)
-
-    candidates = [
-        _SUITE_ROOT / "gtk-neuron" / "target" / "release" / "gtk-neurond",
-        _SUITE_ROOT / "gtk-neuron" / "target" / "debug" / "gtk-neurond",
-        Path("/usr/local/lib/neuronix/gtk-apps/gtk-neuron/gtk-neurond"),
-        Path("/usr/local/bin/gtk-neurond"),
-    ]
-    which = shutil.which("gtk-neurond")
-    if which:
-        candidates.append(Path(which))
-
-    for c in candidates:
-        if c.is_file() and os.access(c, os.X_OK):
-            return c
-    return None
-
-
-def ensure_neuron_daemon() -> None:
-    """Start gtk-neurond if it is not already listening (best-effort)."""
-    if _neuron_socket_connectable():
-        return
-    sock = _neuron_socket_path()
-    try:
-        if sock.exists():
-            sock.unlink()
-    except OSError:
-        pass
-    exe = _find_neurond_binary()
-    if exe is None:
-        return
-    try:
-        sock.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.Popen(
-            [str(exe), "--daemon"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except OSError:
-        return
-    for _ in range(40):
-        time.sleep(0.05)
-        if _neuron_socket_connectable():
-            return
-
-
-# ---------------------------------------------------------------------------
-
-
 def apply_chrome(profile: Optional[Profile] = None) -> None:
     import gi
 
     gi.require_version("Gtk", "4.0")
     gi.require_version("Gdk", "4.0")
     from gi.repository import Gdk, Gtk
-
-    ensure_neuron_daemon()
 
     profile = profile or load_profile()
     hide_csd = hyprbars_active()
@@ -3163,8 +3198,6 @@ def apply_chrome_gtk3(profile: Optional[Profile] = None) -> None:
     gi.require_version("Gtk", "3.0")
     gi.require_version("Gdk", "3.0")
     from gi.repository import Gdk, Gtk
-
-    ensure_neuron_daemon()
 
     profile = profile or load_profile()
     settings = Gtk.Settings.get_default()

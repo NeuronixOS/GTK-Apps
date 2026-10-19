@@ -127,7 +127,7 @@ impl ImageWindow {
             stack,
         });
 
-        crate::neuron::attach(&header, &window, &main_box, &iw);
+        window.set_child(Some(&main_box));
 
         install_actions(&iw);
         setup_context_menu(&iw);
@@ -163,34 +163,6 @@ impl ImageWindow {
             self.list.borrow_mut().open_file(path);
         }
         self.reload_current();
-    }
-
-    pub fn current_path(&self) -> Option<PathBuf> {
-        self.list.borrow().current().map(|p| p.to_path_buf())
-    }
-
-    pub fn rotate_cw(&self) {
-        self.view.rotate_cw();
-    }
-
-    pub fn rotate_ccw(&self) {
-        self.view.rotate_ccw();
-    }
-
-    pub fn flip_horizontal(&self) {
-        self.view.flip_horizontal();
-    }
-
-    pub fn flip_vertical(&self) {
-        self.view.flip_vertical();
-    }
-
-    pub fn save_to(&self, path: &Path) -> Result<(), String> {
-        let pb = self
-            .view
-            .current_pixbuf()
-            .ok_or_else(|| "no image loaded".to_string())?;
-        save_pixbuf(&pb, path)
     }
 
     fn reload_current(&self) {
@@ -335,7 +307,6 @@ fn build_menu_button() -> gtk::MenuButton {
     );
     icons.append_action(&view, "Best Fit", "win.zoom-fit");
     icons.append_action(&view, "Full Screen", "win.fullscreen");
-    gtk_neuron::append_driving_menu_item(&mut icons, &view);
     gtk_theme::append_profile_menu(&view, "win.theme");
     menu.append_section(None, &view);
 

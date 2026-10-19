@@ -172,8 +172,7 @@ impl EditorWindow {
             window.set_data(WINDOW_STATE_KEY, Rc::clone(&this));
         }
 
-        // Wraps `outer` in the driving-mode shell and sets it as the window child.
-        crate::neuron::attach(&header, &window, &outer, &this);
+        window.set_child(Some(&outer));
 
         {
             let first_nb = this.groups.borrow()[0].clone();
@@ -989,7 +988,6 @@ fn build_menubar(
         "view-dual-symbolic",
     );
     icons.append_action(&view, "Fullscreen", "win.fullscreen");
-    gtk_neuron::append_driving_menu_item(&mut icons, &view);
     // Theme profile radios stay plain so stateful indicators remain visible.
     gtk_theme::append_profile_menu(&view, "win.theme");
     icons.append_submenu(

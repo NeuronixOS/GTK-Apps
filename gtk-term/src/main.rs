@@ -16,7 +16,6 @@
 
 mod config;
 mod git_ls;
-mod neuron;
 mod prefs;
 mod search;
 mod terminal;
@@ -26,7 +25,6 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use gtk::prelude::*;
 use gtk::{gdk, gio, glib, pango};
 use gtk4 as gtk;
 use vte4::prelude::*;
@@ -456,7 +454,7 @@ fn build_window_shell(
         window.maximize();
     }
     window.set_titlebar(Some(&header));
-    neuron::attach(&header, &window, &main_box, &notebook, &cfg);
+    window.set_child(Some(&main_box));
 
     {
         let notebook_weak = notebook.downgrade();
@@ -566,7 +564,6 @@ fn build_menu_button(zoom_label: &gtk::Label, notebook: &gtk::Notebook) -> gtk::
     let window_section = gio::Menu::new();
     icons.append_action(&window_section, "New Window", "app.new-window");
     icons.append_action(&window_section, "Full Screen", "win.fullscreen");
-    gtk_neuron::append_driving_menu_item(&mut icons, &window_section);
     menu.append_section(None, &window_section);
 
     // Read-only toggle.

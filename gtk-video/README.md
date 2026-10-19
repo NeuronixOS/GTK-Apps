@@ -11,7 +11,6 @@ Created by Kevin Hinds — [github.com/NeuronixOS/GTK-Apps](https://github.com/N
 - Rotate 90° (Ctrl+R / Ctrl+Shift+R), flip horizontal / vertical, crop with an overlay and aspect presets
 - Export the range with ffmpeg — accurate re-encode (default, required when transforming) or fast stream copy
 - Header bar, status bar, gear menu, suite Profile colors
-- **Self Driving** (ꔮ / Ctrl+D) via gtk-neuron — ask the driver to open, trim, crop, rotate, or export
 
 ## Requirements
 
@@ -90,7 +89,6 @@ sudo install -Dm755 target/release/gtk-video /usr/local/bin/gtk-video
 | `Ctrl+R`              | Rotate clockwise               |
 | `Ctrl+Shift+R`        | Rotate counterclockwise        |
 | `Ctrl+Shift+C`        | Toggle crop overlay            |
-| `Ctrl+D`              | Self Driving                   |
 | `Ctrl+?`              | Keyboard shortcuts             |
 | `Ctrl+Q`              | Quit                           |
 
@@ -129,7 +127,6 @@ gtk-video/
    ├─ window.rs    # header bar, preview, actions, drop target
    ├─ timeline.rs  # draggable in/out handles + playhead
    ├─ crop.rs      # crop overlay + aspect presets
-   ├─ neuron.rs    # Self Driving capability API
    └─ export.rs    # ffmpeg cut / crop / rotate / flip of the selected range
 ```
 
